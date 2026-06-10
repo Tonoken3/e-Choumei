@@ -100,14 +100,14 @@ class ActionEngine:
             if not world.in_bounds(goal):
                 return ActionResult(False, f"No target found: {goal}.")
             if goal == hero.pos:
-                return ActionResult(True, "Already there.")
+                return ActionResult(False, "Already there.")
             new_pos = world.step_toward(hero.pos, goal)
         elif target and not direction:
             goal = world.target_position(hero.pos, target)
             if goal is None:
                 return ActionResult(False, f"No target found: {target}.")
             if goal == hero.pos:
-                return ActionResult(True, f"Already at {target}.")
+                return ActionResult(False, f"Already at {target}.")
             new_pos = world.step_toward(hero.pos, goal)
         elif direction in directions:
             dx, dy = directions[direction]
@@ -170,9 +170,9 @@ class ActionEngine:
             return ActionResult(False, "There is no crop here.")
         crop = sim.crop_book.get(plot.crop)
         if not crop.needs_water:
-            return ActionResult(True, f"{crop.name} does not need watering.")
+            return ActionResult(False, f"{crop.name} does not need watering.")
         if world.weather == "rain":
-            return ActionResult(True, "Rain handles the watering today.")
+            return ActionResult(False, "Rain is already watering the field today.")
         if hero.water < 15 and not hero.has("well"):
             return ActionResult(False, "Too thirsty to spare water.")
         spent = self._spend(sim, 1, 4, outdoor=True)

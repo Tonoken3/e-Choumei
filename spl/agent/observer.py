@@ -37,6 +37,10 @@ class ObservationBuilder:
             },
             "pos": current,
             "nearby": nearby,
+            "landmarks": self._landmarks(sim),
+            # The last few outcomes so the brain can learn within the day why an
+            # action failed (e.g. "Planting needs a field.") — spec §4.1.
+            "recent": list(getattr(sim, "day_log", [])[-3:]),
             "inventory": hero.inventory_summary(),
             "alerts": alerts,
             "trade_offer": sim.current_offer.describe() if sim.current_offer else None,
@@ -55,6 +59,29 @@ class ObservationBuilder:
             f"food value {food} / alerts: {', '.join(obs['alerts']) or 'none'}"
         )
 
+    def _landmarks(self, sim: object) -> dict[str, int]:
+        """Nearest key tiles and their walking distance (in tiles).
+
+        The local brain reads the map directly; an LLM only sees this
+        observation, so without landmarks it cannot tell where water/forest/rock
+        are (spec §4.1: '森(徒歩1AP)','水辺(徒歩2AP)'). Deterministic, a few ints.
+        """
+        world = sim.world
+        hero = sim.hero
+        out: dict[str, int] = {}
+        for label, target in (
+            ("water", "water"),
+            ("forest", "forest"),
+            ("rock", "rock"),
+            ("ready_field", "ready_field"),
+            ("empty_field", "empty_field"),
+            ("home", "home"),
+        ):
+            pos = world.target_position(hero.pos, target)
+            if pos is not None:
+                out[label] = abs(pos.x - hero.pos.x) + abs(pos.y - hero.pos.y)
+        return out
+
     def _alerts(self, sim: object) -> list[str]:
         hero = sim.hero
         world = sim.world
@@ -71,16 +98,17 @@ class ObservationBuilder:
             alerts.append(f"Weather hazard: {world.weather}")
         ready = []
         dry = []
+        needed = 2 if world.weather == "drought" else 1
         for plot in world.plots.values():
             crop = sim.crop_book.get(plot.crop)
             if plot.ready:
                 ready.append(crop.name)
-            elif crop.needs_water and world.weather != "rain" and plot.water_level == 0:
+            elif crop.needs_water and world.weather != "rain" and plot.water_level < needed:
                 dry.append(crop.name)
         if ready:
             alerts.append("Harvest ready: " + ", ".join(sorted(set(ready))))
         if dry:
-            alerts.append("Crops need water")
+            alerts.append("Crops need water twice today" if needed == 2 else "Crops need water")
         if world.season == "autumn" and not hero.has("storage_barrel"):
             alerts.append("Autumn: build storage for winter")
         if world.season == "winter":

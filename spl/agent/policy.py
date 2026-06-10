@@ -10,6 +10,7 @@ class LocalPolicyAgent:
     def choose(self, sim: object) -> GameAction:
         hero = sim.hero
         world = sim.world
+        self._sim = sim
 
         if sim.current_offer and self._can_pay(hero, sim.current_offer.give):
             return self._act("trade_accept", "A trade can turn scraps into winter plans.", id=sim.current_offer.id)
@@ -17,8 +18,7 @@ class LocalPolicyAgent:
         if hero.water < 34:
             if hero.has("well") or world.is_near(hero.pos, "water"):
                 return self._act("drink", "Water first. Heroism is mostly plumbing.")
-            move_ap = 2 if world.weather in {"storm", "snow"} and not hero.has("house_upgrade") else 1
-            if hero.ap_left < move_ap:
+            if hero.ap_left < self._outdoor_ap(sim, 1):
                 return self._act("sleep", "No daylight remains to reach water safely.")
             return self._move("water", "Find water before any clever plan.")
 
@@ -41,11 +41,11 @@ class LocalPolicyAgent:
                 return self._act("sleep", "Too little daylight for a risky food run.")
             if hero.has("fishing_rod") or world.is_near(hero.pos, "water"):
                 if world.is_near(hero.pos, "water"):
-                    return self._act("fish", "Fish for dinner before the stomach starts negotiating.")
-                return self._move("water", "Move to the shore and fish.")
+                    return self._outdoor_or_sleep(sim, "fish", "Fish for dinner before the stomach starts negotiating.", 2)
+                return self._move_or_sleep(sim, "water", "Move to the shore and fish.")
             if world.is_near(hero.pos, "forest") or world.tile_at(hero.pos) in {"forest", "grass", "field", "home"}:
-                return self._act("forage", "Search for emergency food.")
-            return self._move("forest", "Move toward forage.")
+                return self._outdoor_or_sleep(sim, "forage", "Search for emergency food.", 2)
+            return self._move_or_sleep(sim, "forest", "Move toward forage.")
 
         if hero.ap_left <= 1:
             return self._act("sleep", "The day is spent.")
@@ -107,28 +107,36 @@ class LocalPolicyAgent:
         if planting:
             return planting
 
-        material = self._needed_material(sim)
-        if material:
-            return self._gather_material(sim, material)
+        # Winter is survival, not prospecting. Building from existing stock is
+        # still allowed above, but do not trek out to mine/chop for new
+        # infrastructure while water or food is slipping — that is how a hero
+        # freezes with a half-built house.
+        winter_pressure = world.season == "winter" and (hero.water < 58 or hero.hunger < 62)
+        if not winter_pressure:
+            material = self._needed_material(sim)
+            if material:
+                return self._gather_material(sim, material)
 
         if world.season == "winter":
+            if hero.water < 58 and (hero.has("well") or world.is_near(hero.pos, "water")):
+                return self._act("drink", "Sip before the cold makes every trip costlier.")
             food = self._best_food(hero)
             if hero.hunger < 72 and food:
                 return self._act("eat", f"Winter ration: {food}.", item=food)
             if hero.has("fishing_rod"):
                 if world.is_near(hero.pos, "water"):
-                    return self._act("fish", "Fish through winter; the field is asleep.")
-                return self._move("water", "Winter food waits at the shore.")
-            return self._act("forage", "Winter forage is thin, but thin is not zero.")
+                    return self._outdoor_or_sleep(sim, "fish", "Fish through winter; the field is asleep.", 2)
+                return self._move_or_sleep(sim, "water", "Winter food waits at the shore.")
+            return self._outdoor_or_sleep(sim, "forage", "Winter forage is thin, but thin is not zero.", 2)
 
         if self._food_value(hero) < self._desired_food_value(world.day, world.season):
             if hero.has("fishing_rod") and world.is_near(hero.pos, "water"):
-                return self._act("fish", "Build the food buffer.")
+                return self._outdoor_or_sleep(sim, "fish", "Build the food buffer.", 2)
             if hero.has("fishing_rod"):
-                return self._move("water", "Go fishing for reserves.")
+                return self._move_or_sleep(sim, "water", "Go fishing for reserves.")
             if world.tile_at(hero.pos) == "forest" or world.is_near(hero.pos, "forest"):
-                return self._act("forage", "Gather wild food and seeds.")
-            return self._move("forest", "Move toward forest forage.")
+                return self._outdoor_or_sleep(sim, "forage", "Gather wild food and seeds.", 2)
+            return self._move_or_sleep(sim, "forest", "Move toward forest forage.")
 
         if hero.ap_left >= 3 and hero.sanity < 75:
             return self._act("write_diary", "A calm mind is a winter tool.", say="Today did not defeat me.")
@@ -196,9 +204,25 @@ class LocalPolicyAgent:
 
         return world.find_nearest(sim.hero.pos, needs_water)
 
-    def _next_craft(self, sim: object) -> GameAction | None:
-        hero = sim.hero
-        priorities = [
+    def _craft_priorities(self, season: str) -> list[str]:
+        # Get tools and a fire first so the hero can function. From summer on,
+        # pull the winter-survival trio forward — a well (water), a barrel
+        # (preserved food) and the house upgrade (no -4 HP/day in the snow) —
+        # ahead of the comfort builds (stove, fence), so shelter is finished
+        # before the cold arrives, not abandoned half-built in a blizzard.
+        if season in {"summer", "autumn"}:
+            return [
+                "stone_axe",
+                "hoe",
+                "fishing_rod",
+                "campfire",
+                "well",
+                "storage_barrel",
+                "house_upgrade",
+                "stove",
+                "fence",
+            ]
+        return [
             "stone_axe",
             "hoe",
             "fishing_rod",
@@ -209,19 +233,10 @@ class LocalPolicyAgent:
             "fence",
             "house_upgrade",
         ]
-        if sim.world.season == "autumn":
-            priorities = [
-                "stone_axe",
-                "hoe",
-                "fishing_rod",
-                "campfire",
-                "storage_barrel",
-                "well",
-                "stove",
-                "fence",
-                "house_upgrade",
-            ]
-        for key in priorities:
+
+    def _next_craft(self, sim: object) -> GameAction | None:
+        hero = sim.hero
+        for key in self._craft_priorities(sim.world.season):
             if hero.has(key):
                 continue
             recipe = sim.recipe_book.get(key)
@@ -237,7 +252,7 @@ class LocalPolicyAgent:
 
     def _needed_material(self, sim: object) -> str | None:
         hero = sim.hero
-        priorities = ["stone_axe", "hoe", "fishing_rod", "campfire", "storage_barrel", "well", "stove", "fence", "house_upgrade"]
+        priorities = self._craft_priorities(sim.world.season)
         for key in priorities:
             if hero.has(key):
                 continue
@@ -255,19 +270,31 @@ class LocalPolicyAgent:
 
     def _gather_material(self, sim: object, material: str) -> GameAction:
         world = sim.world
+        hero = sim.hero
         if material == "wood":
-            if world.tile_at(sim.hero.pos) == "forest" or world.is_near(sim.hero.pos, "forest"):
-                return self._act("chop", "Wood is tomorrow's tool.")
-            return self._move("forest", "Move to trees for wood.")
+            if world.tile_at(hero.pos) == "forest" or world.is_near(hero.pos, "forest"):
+                base = 1 if hero.has("stone_axe") else 2
+                return self._outdoor_or_sleep(sim, "chop", "Wood is tomorrow's tool.", base)
+            return self._move_or_sleep(sim, "forest", "Move to trees for wood.")
         if material in {"stone", "clay", "iron_ore"}:
-            if world.tile_at(sim.hero.pos) == "rock" or world.is_near(sim.hero.pos, "rock"):
-                return self._act("mine", "Stone and clay unlock the camp.")
-            return self._move("rock", "Move to rocks for materials.")
+            if world.tile_at(hero.pos) == "rock" or world.is_near(hero.pos, "rock"):
+                return self._outdoor_or_sleep(sim, "mine", "Stone and clay unlock the camp.", 2)
+            return self._move_or_sleep(sim, "rock", "Move to rocks for materials.")
         if material in {"fiber", "seeds", "food"}:
-            if world.tile_at(sim.hero.pos) == "forest" or world.is_near(sim.hero.pos, "forest") or world.tile_at(sim.hero.pos) in {"grass", "field"}:
-                return self._act("forage", "Forage for fiber, seeds, or small meals.")
-            return self._move("forest", "Move to forage.")
-        return self._act("forage", "Search for whatever the island offers.")
+            if world.tile_at(hero.pos) == "forest" or world.is_near(hero.pos, "forest") or world.tile_at(hero.pos) in {"grass", "field"}:
+                return self._outdoor_or_sleep(sim, "forage", "Forage for fiber, seeds, or small meals.", 2)
+            return self._move_or_sleep(sim, "forest", "Move to forage.")
+        return self._outdoor_or_sleep(sim, "forage", "Search for whatever the island offers.", 2)
+
+    def _outdoor_or_sleep(self, sim: object, action: str, think: str, base: int) -> GameAction:
+        if sim.hero.ap_left < self._outdoor_ap(sim, base):
+            return self._act("sleep", "No daylight remains for outdoor work today.")
+        return self._act(action, think)
+
+    def _move_or_sleep(self, sim: object, target: str, think: str) -> GameAction:
+        if sim.hero.ap_left < self._outdoor_ap(sim, 1):
+            return self._act("sleep", "No daylight remains to travel safely.")
+        return self._move(target, think)
 
     def _best_food(self, hero: object) -> str | None:
         foods = [(item, FOOD_VALUES[item]) for item, amount in hero.inventory.items() if amount > 0 and item in FOOD_VALUES]
@@ -320,24 +347,48 @@ class LocalPolicyAgent:
         return self._act("move", think, x=pos.x, y=pos.y)
 
     def _outdoor_ap(self, sim: object, base: int) -> int:
+        # Mirror ActionEngine._spend exactly so an AP guard never under-counts:
+        # exhausted stamina doubles the base cost, then bad weather adds one.
+        ap = base
+        if sim.hero.stamina <= 0:
+            ap *= 2
         if sim.world.weather in {"storm", "snow"} and not sim.hero.has("house_upgrade"):
-            return base + 1
-        return base
+            ap += 1
+        return ap
 
     def _act(self, action: str, think: str, **args: object) -> GameAction:
         return GameAction(action=action, args=args, think=think, say=self._line_for(action))
 
+    # A few lines per action, so the hero's voice — the 迷言 (memorable-quote)
+    # supply the spec sells — does not collapse into one filler string. The
+    # variant is picked from the day (pure, no RNG), keeping determinism intact.
+    _LINES: dict[str, tuple[str, ...]] = {
+        "till": ("The soil opens like a slow promise.", "Break the ground; ask it for a future.", "A field is just patience with edges."),
+        "plant": ("Small seeds, long bets.", "I bury a little hope in the dirt.", "Grow slowly, but please grow."),
+        "water": ("Grow, please. I am asking politely.", "A drink for you before one for me.", "Rain by hand is still rain."),
+        "harvest": ("The soil answered.", "Payday, measured in leaves.", "What I planted, I now carry."),
+        "chop": ("Wood now, warmth later.", "The forest lends; I will remember.", "Each swing is a wall I do not yet have."),
+        "mine": ("Stone is just slow money.", "The rock gives grudgingly, but it gives.", "Dust on my hands, plans in my head."),
+        "fish": ("If the sea has mercy, dinner has fins.", "Patience, baited.", "The water keeps its secrets and sometimes a meal."),
+        "forage": ("The island hides snacks in strange places.", "Eyes down, hopes up.", "Whatever the island spares, I will take."),
+        "craft": ("Hands, remember what the mind promised.", "A tool is a wish made of wood.", "Build the thing that builds the rest."),
+        "build": ("One more piece of civilization.", "Today I out-stubborn the weather.", "Walls are arguments against winter."),
+        "cook": ("Fire makes the difference between food and risk.", "A warm meal is a small victory.", "Better cooked than brave."),
+        "eat": ("Fuel first, glory later.", "The body votes, and it votes for lunch.", "Quiet the stomach; free the mind."),
+        "drink": ("A well-timed sip is a strategy.", "Water is the cheapest courage.", "Thirst loses to a steady hand."),
+        "store": ("A full shelf is a calmer night.", "Save now, eat in the snow.", "Winter, I am getting ready for you."),
+        "trade_accept": ("A fair swap is two people winning.", "Someone else's surplus, my survival.", "Trade turns scraps into plans."),
+        "trade_decline": ("Not today, friend.", "I will keep what I have, thank you.", "A polite no is still a no."),
+        "move": ("One foot, then the other.", "The island is wide; my legs are willing.", "Going to where the work is."),
+        "rest": ("Even the stubborn must breathe.", "Rest is not surrender.", "I gather myself before the dark."),
+        "write_diary": ("One line between me and the dark.", "If I write it down, the day was real.", "Ink is cheaper than forgetting."),
+        "sleep": ("Tomorrow can carry the rest.", "I bank the day and close my eyes.", "Enough. The island will wait."),
+    }
+
     def _line_for(self, action: str) -> str:
-        lines = {
-            "eat": "Fuel first, glory later.",
-            "drink": "A well-timed sip is a strategy.",
-            "plant": "Small seeds, long bets.",
-            "water": "Grow, please. I am asking politely.",
-            "harvest": "The soil answered.",
-            "craft": "Hands, remember what the mind promised.",
-            "build": "One more piece of civilization.",
-            "fish": "If the sea has mercy, dinner has fins.",
-            "forage": "The island hides snacks in strange places.",
-            "sleep": "Tomorrow can carry the rest.",
-        }
-        return lines.get(action, "One useful step.")
+        variants = self._LINES.get(action)
+        if not variants:
+            return "One useful step."
+        sim = getattr(self, "_sim", None)
+        index = sim.world.day if sim is not None else 0
+        return variants[index % len(variants)]

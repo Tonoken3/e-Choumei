@@ -5,7 +5,7 @@ from pathlib import Path
 
 from spl.agent.memory import Memory
 
-from .actions import ActionEngine, ActionResult, GameAction
+from .actions import ACTION_WORDS, ActionEngine, ActionResult, GameAction
 from .crops import FOOD_VALUES, CropBook
 from .crafting import RecipeBook
 from .events import EventBook, MerchantOffer
@@ -14,6 +14,19 @@ from .rng import GameRng
 from .world import SEASON_NAMES, WEATHER_NAMES, World
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
+
+# The "混乱" voice (spec §4.3): a small pool of disoriented lines so a confused
+# hero — the lovable, struggling small model — does not repeat one stock line.
+CONFUSION_LINES = (
+    "Where am I? The island has too many edges.",
+    "Wait... which way was the sea?",
+    "My hands forgot what they were holding.",
+    "The map in my head went quiet.",
+    "Was I going somewhere? The thought slipped away.",
+    "Too many edges. I cannot find the next step.",
+    "I blink, and the plan is gone.",
+    "The wind said something. I did not catch it.",
+)
 
 
 class Simulation:
@@ -61,6 +74,10 @@ class Simulation:
         self.completed = False
         self.failed = False
         self.result_reason = ""
+        # Optional LLM diarist: an object exposing write_diary(sim, season, weather)
+        # -> str | None. When present, the hero's nightly diary is authored by the
+        # model (spec §5); otherwise the deterministic template in Memory is used.
+        self.diarist: object | None = None
         self.log(f"Day {self.world.day} begins: {SEASON_NAMES[self.world.season]}, {WEATHER_NAMES[self.world.weather]}.")
         self._start_day_events()
 
@@ -71,13 +88,19 @@ class Simulation:
     def step(self, request: GameAction, confuse_on_invalid: bool = False) -> ActionResult:
         if self.done:
             return ActionResult(False, "Simulation is already finished.")
+        # An action word the world does not recognise can never become reality.
+        # Make it confusion unconditionally so the world keeps turning no matter
+        # how the brain is wired (spec §4.3: クラッシュは存在しない).
+        if request.action not in ACTION_WORDS:
+            return self.confuse(f"Unknown action: {request.action}")
         if self.hero.sanity <= 7 and self.rng.chance(0.20):
             return self.confuse("Sanity collapsed into static.")
         result = self.engine.perform(self, request)
         if not result.ok and confuse_on_invalid:
-            result = self.confuse(result.message)
-        else:
-            self.log(result.message)
+            # confuse() fully resolves the turn (safe action + its own end_day),
+            # so return immediately: never let step() run end_day() a second time.
+            return self.confuse(result.message)
+        self.log(result.message)
         if result.end_day or self.hero.ap_left <= 0:
             self.end_day()
         if not self.hero.alive:
@@ -89,7 +112,7 @@ class Simulation:
         self.hero.confusion_count += 1
         self.hero.adjust("sanity", -3)
         self.log(f"Confusion: {reason}")
-        self.hero.spoken_lines.append("Where am I? The island has too many edges.")
+        self.hero.spoken_lines.append(self.rng.choice(CONFUSION_LINES))
         fallback = GameAction.safe("rest") if self.hero.ap_left >= 2 else GameAction.safe("sleep")
         result = self.engine.perform(self, fallback)
         self.log("[confused] " + result.message)
@@ -106,7 +129,15 @@ class Simulation:
         self._daily_decay()
         season = SEASON_NAMES[self.world.season]
         weather = WEATHER_NAMES[self.world.weather]
-        self.memory.nightly_entry(self.world.day, season, weather, self.day_log, self.hero.hp)
+        llm_line = None
+        if self.diarist is not None:
+            try:
+                llm_line = self.diarist.write_diary(self, season, weather)
+            except Exception as exc:  # noqa: BLE001 - the diary must never crash the night
+                self.log(f"Diary (LLM) unavailable; the hero writes by hand: {exc}")
+        self.memory.nightly_entry(
+            self.world.day, season, weather, self.day_log, self.hero.hp, llm_line=llm_line
+        )
         self.hero.days_survived = self.world.day if self.hero.alive else max(0, self.world.day - 1)
         if not self.hero.alive:
             self.failed = True
@@ -152,6 +183,9 @@ class Simulation:
             f"{WEATHER_NAMES[world.weather]} AP {hero.ap_left}/{self.ap_per_day} | "
             f"HP {hero.hp} Hu {hero.hunger} Wa {hero.water} St {hero.stamina} Sa {hero.sanity}"
         )
+
+    def set_diarist(self, diarist: object | None) -> None:
+        self.diarist = diarist
 
     def _start_day_events(self) -> None:
         if self.world.day > 1 and self.world.day % self.event_book.merchant_interval == 0:

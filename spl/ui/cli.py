@@ -8,6 +8,7 @@ import time
 from spl.agent.llm_client import OpenAICompatibleBrain, find_cassette
 from spl.agent.observer import ObservationBuilder
 from spl.agent.policy import LocalPolicyAgent
+from spl.arena.leaderboard import select_meigen
 from spl.core.actions import GameAction
 from spl.core.crops import FOOD_VALUES
 from spl.core.sim import PROJECT_ROOT, Simulation
@@ -33,8 +34,13 @@ def run_play(args: object) -> int:
     brain = _make_brain(args)
     observer = ObservationBuilder()
     last_day = sim.world.day
+    if args.llm and brain is not None:
+        sim.set_diarist(brain)
+    turns = 0
+    max_turns = args.days * 50
 
-    while not sim.done:
+    while not sim.done and turns < max_turns:
+        turns += 1
         if not args.no_clear:
             _clear()
         print_frame(sim, observer, radius=args.radius)
@@ -73,6 +79,8 @@ def run_play(args: object) -> int:
             if args.speed:
                 time.sleep(args.speed)
 
+    if turns >= max_turns and not sim.done:
+        sim.result_reason = "Stopped by max turn guard."
     if not args.no_clear:
         _clear()
     print_result(sim)
@@ -83,6 +91,8 @@ def run_simulate(args: object) -> int:
     sim = Simulation(seed=args.seed, max_days=args.days)
     local_agent = LocalPolicyAgent()
     brain = _make_brain(args)
+    if args.llm and brain is not None:
+        sim.set_diarist(brain)
     max_turns = args.days * 50
     turns = 0
     while not sim.done and turns < max_turns:
@@ -218,9 +228,13 @@ def print_result(sim: Simulation) -> None:
         if amount > 0:
             print(f"  {item}: {amount}")
     print()
-    print("Best lines:")
-    for line in sim.hero.spoken_lines[-5:]:
-        print(f"  \"{line}\"")
+    print("迷言ベスト5 (best lines):")
+    best = select_meigen(sim.hero.spoken_lines, 5)
+    if best:
+        for line in best:
+            print(f"  \"{line}\"")
+    else:
+        print("  (the hero kept their thoughts to themselves)")
     print()
     print_diary(sim)
 

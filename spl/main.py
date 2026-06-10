@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import argparse
 
-from spl.arena.runner import run_local_arena
+from spl.arena.runner import run_cassette_arena, run_local_arena
 from spl.ui.cli import run_play, run_simulate
 
 
@@ -23,9 +23,16 @@ def build_parser() -> argparse.ArgumentParser:
     _add_common(simulate)
     simulate.set_defaults(func=run_simulate)
 
-    arena = sub.add_parser("arena", help="run a small deterministic local arena")
-    arena.add_argument("--seeds", default="42,43,44,45", help="comma-separated seeds")
+    arena = sub.add_parser("arena", help="compare cassettes on one seed, or one brain over many seeds")
+    arena.add_argument("--seeds", default="42,43,44,45", help="comma-separated seeds (local sweep mode)")
+    arena.add_argument("--seed", type=int, default=42, help="fixed seed when comparing cassettes")
     arena.add_argument("--days", type=int, default=112)
+    arena.add_argument(
+        "--cassettes",
+        default=None,
+        help="comma-separated cassette names or 'all' — pit them on the same seed (spec §6.3)",
+    )
+    arena.add_argument("--parallel", type=int, default=1, help="run cassettes concurrently")
     arena.set_defaults(func=run_arena)
 
     return parser
@@ -39,6 +46,28 @@ def _add_common(parser: argparse.ArgumentParser) -> None:
 
 
 def run_arena(args: object) -> int:
+    if args.cassettes:
+        from spl.agent.llm_client import load_cassettes
+        from spl.core.sim import PROJECT_ROOT
+
+        available = load_cassettes(PROJECT_ROOT / "config" / "models.toml")
+        by_name = {c.name: c for c in available}
+        if args.cassettes.strip().lower() == "all":
+            chosen = available
+        else:
+            names = [n.strip() for n in args.cassettes.split(",") if n.strip()]
+            chosen = [by_name[n] for n in names if n in by_name]
+            missing = [n for n in names if n not in by_name]
+            if missing:
+                print(f"Unknown cassette(s): {', '.join(missing)}. Available: {', '.join(by_name)}")
+            if not chosen:
+                return 2
+        print(
+            f"Arena on seed {args.seed} for {args.days} days — "
+            f"cassettes: {', '.join(c.name for c in chosen)}"
+        )
+        print(run_cassette_arena(args.seed, args.days, chosen, parallel=args.parallel))
+        return 0
     seeds = [int(part.strip()) for part in args.seeds.split(",") if part.strip()]
     print(run_local_arena(seeds, args.days))
     return 0

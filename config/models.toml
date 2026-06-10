@@ -1,6 +1,13 @@
+# Cassette = ファミコンのカセット。OpenAI互換サーバ(LM Studio / vLLM / llama.cpp / Ollama)を
+# base_url に指すだけで勇者の脳を差し替えられる。
+#
+# model = "auto" にすると、起動中サーバの /v1/models から実際にロードされている
+# チャットモデルを自動で拾う(ハードコーディング不要・LM Studioで載せ替えればそのまま追従)。
+# 特定モデルに固定したいときだけ model に正確なIDを書く。
+
 [[cassette]]
 name = "Local勇者"
-base_url = ""
+base_url = ""              # base_url 空 = 同梱のローカル政策AI(LLM不要・決定論)
 model = "local-policy"
 api_key = "local"
 temperature = 0.4
@@ -10,21 +17,20 @@ persona = "You are a careful settler who wants to survive the island year."
 
 [[cassette]]
 name = "Qwen勇者"
-base_url = "http://localhost:1234/v1"
-model = "qwen-local"
+base_url = "http://127.0.0.1:1234/v1"
+model = "auto"
 api_key = "lm-studio"
 temperature = 0.7
-max_tokens = 256
+max_tokens = 384
 json_mode = true
 persona = "あなたは計画的で慎重な開拓者だ。冬に備えて保存食と井戸を重視する。"
 
 [[cassette]]
 name = "ちび勇者"
-base_url = "http://localhost:1234/v1"
-model = "small-local"
+base_url = "http://127.0.0.1:1234/v1"
+model = "auto"
 api_key = "lm-studio"
 temperature = 0.8
-max_tokens = 180
-json_mode = false
+max_tokens = 384
+json_mode = true
 persona = "あなたは元気いっぱいの見習い開拓者だ。短く素直に判断する。"
-
