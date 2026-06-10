@@ -23,6 +23,20 @@ def build_parser() -> argparse.ArgumentParser:
     _add_common(simulate)
     simulate.set_defaults(func=run_simulate)
 
+    pixel = sub.add_parser("pixel", help="play/watch in the isometric pixel-art window (needs pygame)")
+    pixel.add_argument("--seed", type=int, default=42)
+    pixel.add_argument("--days", type=int, default=112)
+    pixel.add_argument("--llm", action="store_true", help="let an OpenAI-compatible cassette play")
+    pixel.add_argument("--cassette", default="Qwen勇者", help="cassette name from config/models.toml")
+    pixel.add_argument("--manual", action="store_true", help="control the hero manually")
+    pixel.add_argument("--speed", type=int, default=2, choices=(1, 2, 3), help="watch speed: 1 slow / 2 normal / 3 fast")
+    pixel.add_argument("--start-day", type=int, default=0, help="debug: fast-forward (local brain) to this day before rendering")
+    # hidden verification flags
+    pixel.add_argument("--shots", type=int, default=0, help=argparse.SUPPRESS)
+    pixel.add_argument("--shots-ui", action="store_true", help=argparse.SUPPRESS)
+    pixel.add_argument("--shot-dir", default="/tmp/spl_px", help=argparse.SUPPRESS)
+    pixel.set_defaults(func=run_pixel)
+
     arena = sub.add_parser("arena", help="compare cassettes on one seed, or one brain over many seeds")
     arena.add_argument("--seeds", default="42,43,44,45", help="comma-separated seeds (local sweep mode)")
     arena.add_argument("--seed", type=int, default=42, help="fixed seed when comparing cassettes")
@@ -43,6 +57,13 @@ def _add_common(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--days", type=int, default=112)
     parser.add_argument("--llm", action="store_true", help="use OpenAI-compatible cassette when possible")
     parser.add_argument("--cassette", default="Qwen勇者", help="cassette name from config/models.toml")
+
+
+def run_pixel(args: object) -> int:
+    # Import lazily so the rest of the CLI works without pygame installed.
+    from spl.ui.pixel import run_pixel as _run_pixel
+
+    return _run_pixel(args)
 
 
 def run_arena(args: object) -> int:
