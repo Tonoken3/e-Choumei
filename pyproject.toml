@@ -1,0 +1,19 @@
+[project]
+name = "spl-rpg"
+version = "0.1.0"
+description = "Self-sufficient Player powered by LLM: a terminal survival RPG prototype."
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = []
+
+[project.optional-dependencies]
+tui = ["textual>=0.86"]
+llm = ["openai>=1.40"]
+dev = ["pytest>=8.0"]
+
+[project.scripts]
+spl = "spl.main:main"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+

@@ -1,0 +1,25 @@
+[merchant]
+interval = 7
+
+[[merchant.offer]]
+id = "fish_for_seeds"
+give = { fish = 2 }
+take = { pumpkin_seed = 2, tomato_seed = 1 }
+
+[[merchant.offer]]
+id = "iron_for_seed_pack"
+give = { iron_ore = 1 }
+take = { turnip_seed = 3, wheat_seed = 2, pumpkin_seed = 1 }
+
+[[merchant.offer]]
+id = "berries_for_fiber"
+give = { berries = 3 }
+take = { fiber = 4 }
+
+[wild_dog]
+base_chance = 0.045
+
+[bellyache]
+raw_fish_chance = 0.18
+mushroom_chance = 0.28
+

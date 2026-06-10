@@ -1,0 +1,20 @@
+[world]
+width = 20
+height = 20
+season_length = 28
+days_per_year = 112
+ap_per_day = 12
+
+[hero]
+hp = 100
+hunger = 78
+water = 82
+stamina = 92
+sanity = 85
+
+[start_inventory]
+turnip_seed = 4
+wheat_seed = 2
+berries = 2
+wood = 1
+

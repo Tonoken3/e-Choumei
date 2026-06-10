@@ -1,0 +1,55 @@
+[[recipe]]
+key = "stone_axe"
+name = "Stone Axe"
+kind = "tool"
+requires = { wood = 2, stone = 2, fiber = 1 }
+
+[[recipe]]
+key = "hoe"
+name = "Hoe"
+kind = "tool"
+requires = { wood = 2, stone = 1 }
+
+[[recipe]]
+key = "fishing_rod"
+name = "Fishing Rod"
+kind = "tool"
+requires = { wood = 1, fiber = 3 }
+
+[[recipe]]
+key = "campfire"
+name = "Campfire"
+kind = "build"
+requires = { wood = 3, stone = 2 }
+
+[[recipe]]
+key = "stove"
+name = "Stove"
+kind = "build"
+requires = { wood = 4, stone = 6, clay = 2 }
+station = "campfire"
+
+[[recipe]]
+key = "well"
+name = "Well"
+kind = "build"
+requires = { wood = 6, stone = 8, clay = 3 }
+
+[[recipe]]
+key = "storage_barrel"
+name = "Storage Barrel"
+kind = "build"
+requires = { wood = 6, fiber = 4, clay = 2 }
+
+[[recipe]]
+key = "house_upgrade"
+name = "House Upgrade"
+kind = "build"
+requires = { wood = 14, stone = 8 }
+
+[[recipe]]
+key = "fence"
+name = "Fence"
+kind = "build"
+requires = { wood = 8, stone = 4 }
+

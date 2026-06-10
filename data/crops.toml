@@ -1,0 +1,40 @@
+[[crop]]
+key = "turnip"
+name = "Turnip"
+seed = "turnip_seed"
+grow_days = 4
+seasons = ["spring", "autumn"]
+needs_water = true
+food = 18
+yield = 2
+
+[[crop]]
+key = "wheat"
+name = "Wheat"
+seed = "wheat_seed"
+grow_days = 10
+seasons = ["spring", "summer"]
+needs_water = false
+food = 12
+yield = 2
+
+[[crop]]
+key = "tomato"
+name = "Tomato"
+seed = "tomato_seed"
+grow_days = 7
+seasons = ["summer"]
+needs_water = true
+food = 20
+yield = 3
+
+[[crop]]
+key = "pumpkin"
+name = "Pumpkin"
+seed = "pumpkin_seed"
+grow_days = 12
+seasons = ["autumn"]
+needs_water = true
+food = 35
+yield = 2
+
