@@ -185,6 +185,7 @@ class PixelApp:
         self.diary_scroll = 0
         self.craft_sel = 0
         self.heaven_text = ""
+        self._text_input_on = False
         # 承認制 (approval mode): when the day rolls over we auto-pause at the
         # boundary and show a pit-wall strip until the watcher resumes. This is
         # the day we have already paused on (so we pause once per boundary).
@@ -656,9 +657,14 @@ class PixelApp:
         if self.overlay is not None:
             self._click_overlay(wx, wy)
             return
-        # 1b) 承認制 pit wall grabs clicks at the day boundary.
+        # 1b) 承認制 pit wall takes first pick at the day boundary, but the HUD
+        # button bar stays clickable (changing speed away from 承認 resumes).
         if self.approval_pause:
-            self._click_pitwall(wx, wy)
+            if self._click_pitwall(wx, wy):
+                return
+            btn = self._button_at(wx, wy)
+            if btn is not None:
+                self._activate_button(btn)
             return
         # 2) auto-walking: any click interrupts (spec: "クリックで中断")
         if self.walk_target is not None:
@@ -838,15 +844,18 @@ class PixelApp:
         if self.overlay in {"diary", "help"}:
             self.overlay = None
 
-    def _click_pitwall(self, wx: int, wy: int) -> None:
+    def _click_pitwall(self, wx: int, wy: int) -> bool:
         hits = self._hits.get("pitwall") or {}
         nxt = hits.get("next")
         edit = hits.get("edit")
         if nxt is not None and nxt.collidepoint(wx, wy):
             self._resume_next_day()
-        elif edit is not None and edit.collidepoint(wx, wy):
+            return True
+        if edit is not None and edit.collidepoint(wx, wy):
             self.overlay = "heaven"
             self.heaven_text = self.sim.advice_from_heaven or ""
+            return True
+        return False
 
     def _click_result(self, wx: int, wy: int) -> None:
         rects = self._hits.get("result") or {}
@@ -1017,9 +1026,7 @@ class PixelApp:
             elif key == pg.K_v and (mods & pg.KMOD_CTRL):
                 self._paste_into_heaven()
             else:
-                ch = getattr(self, "_last_unicode", "")
-                if ch and ch.isprintable() and len(self.heaven_text) < 60:
-                    self.heaven_text += ch
+                pass  # printable text arrives via TEXTINPUT (IME-composed too)
             return
 
         # 承認制 pit wall (no editor/popup open): Enter = 次の日へ. Esc opens the
@@ -1663,6 +1670,9 @@ class PixelApp:
                 elif event.type == pg.KEYDOWN:
                     self._last_unicode = getattr(event, "unicode", "")
                     self._handle_key(event.key)
+                elif event.type == getattr(pg, "TEXTINPUT", -1):
+                    if self.overlay == "heaven" and event.text:
+                        self.heaven_text = (self.heaven_text + event.text)[:60]
                 elif event.type == pg.MOUSEMOTION:
                     self._handle_motion(*event.pos)
                 elif event.type == pg.MOUSEBUTTONDOWN:
@@ -1679,6 +1689,13 @@ class PixelApp:
                 elif event.type == pg.MOUSEBUTTONUP:
                     if event.button in (2, 3):
                         self._end_pan()
+            want_ti = self.overlay == "heaven"
+            if want_ti != self._text_input_on:
+                try:  # enables the OS IME (Japanese composition) over the input box
+                    (pg.key.start_text_input if want_ti else pg.key.stop_text_input)()
+                except Exception:  # noqa: BLE001 - dummy/headless drivers
+                    pass
+                self._text_input_on = want_ti
             self._update(dt, now)
             self.render(window)
             pg.display.flip()

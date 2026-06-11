@@ -664,6 +664,39 @@ class SakusenTests(unittest.TestCase):
         self.assertFalse(app.approval_pause, "[次の日へ] did not resume")
 
 
+@unittest.skipUnless(_HAS_PYGAME, "pygame not installed")
+class PitwallRegressionTests(unittest.TestCase):
+    """Bugs hit live by the player on 2026-06-11."""
+
+    def _app(self):
+        from types import SimpleNamespace
+
+        from spl.ui.pixel.app import PixelApp
+
+        args = SimpleNamespace(seed=42, days=112, llm=False, cassette="x", manual=False,
+                               speed=1, scale=2, start_day=0, shots=0, shots_ui=False,
+                               shot_dir="/tmp/spl_test", strategy=None, tps=0.0)
+        return PixelApp(args, headless=True)
+
+    def test_changing_speed_during_approval_pause_resumes(self) -> None:
+        app = self._app()
+        app.approval_pause = True
+        app._refresh_buttons()
+        speed_btn = next(b for b in app.buttons if b.key == "speed")
+        app._handle_click(speed_btn.rect.centerx, speed_btn.rect.centery)
+        self.assertNotEqual(app.speed, 1, "speed button must stay clickable at the pit wall")
+        self.assertFalse(app.approval_pause, "leaving 承認 must lift the boundary pause")
+
+    def test_textinput_appends_to_strategy_overlay(self) -> None:
+        app = self._app()
+        app.overlay = "heaven"
+        app.heaven_text = ""
+        # simulate what the TEXTINPUT branch does with IME-composed Japanese
+        for piece in ("井戸を", "掘れ"):
+            app.heaven_text = (app.heaven_text + piece)[:60]
+        self.assertEqual(app.heaven_text, "井戸を掘れ")
+
+
 if __name__ == "__main__":
     unittest.main()
 
