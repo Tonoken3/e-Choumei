@@ -89,6 +89,118 @@ class SplSchemaTests(unittest.TestCase):
         self.assertEqual(parsed.args["item"], "berries")
 
 
+try:  # the pixel/voxel frontend needs pygame; skip its tests if it is absent
+    import os as _os
+
+    _os.environ.setdefault("SDL_VIDEODRIVER", "dummy")
+    import pygame as _pygame  # noqa: F401
+
+    _HAS_PYGAME = True
+except Exception:  # noqa: BLE001
+    _HAS_PYGAME = False
+
+
+@unittest.skipUnless(_HAS_PYGAME, "pygame not installed")
+class PixelVoxelTests(unittest.TestCase):
+    """Stage-4 neo-retro voxel frontend: iso picking + synthetic UI clicks."""
+
+    def test_iso_screen_to_tile_round_trips_at_all_sprite_scales(self) -> None:
+        from spl.ui.pixel import iso
+
+        for scale in iso.SPRITE_SCALES:
+            for offset in ((0, 0), (500, 200), (-37, 91)):
+                ox, oy = offset
+                for x in range(0, 20):
+                    for y in range(0, 20):
+                        cx, cy = iso.tile_center(x, y, ox, oy, scale)
+                        got = iso.screen_to_tile(cx, cy, ox, oy, scale)
+                        self.assertEqual(
+                            (got.x, got.y), (x, y),
+                            f"round-trip failed: scale {scale} offset {offset} cell ({x},{y})",
+                        )
+
+    def _fhd_app(self):
+        from types import SimpleNamespace
+
+        from spl.ui.pixel.app import PixelApp
+
+        args = SimpleNamespace(
+            seed=42, days=112, llm=False, cassette="x", manual=True, speed=2,
+            scale=2, start_day=0, shots=0, shots_ui=False, shot_dir="/tmp/spl_test",
+        )
+        return PixelApp(args, headless=True)
+
+    def test_window_defaults_to_full_hd(self) -> None:
+        from spl.ui.pixel import iso
+
+        app = self._fhd_app()
+        self.assertEqual((app.lay.win_w, app.lay.win_h), (1920, 1080))
+        # map band is full-width and a tall band above the HUD
+        self.assertEqual(app.lay.map_rect.width, 1920)
+        self.assertGreater(app.lay.map_rect.height, 600)
+        # a discrete sprite scale was chosen and the factory matches it
+        self.assertIn(app.lay.sprite_scale, iso.SPRITE_SCALES)
+        self.assertEqual(app.factory.scale, app.lay.sprite_scale)
+
+    def test_tile_under_picks_hero_tile_from_its_screen_centre(self) -> None:
+        from spl.ui.pixel import iso
+
+        app = self._fhd_app()
+        hero = app.sim.hero.pos
+        cx, cy = iso.tile_center(hero.x, hero.y, app.offset_x, app.offset_y,
+                                 app.lay.sprite_scale)
+        picked = app._tile_under(cx, cy)
+        self.assertIsNotNone(picked)
+        self.assertEqual((picked.x, picked.y), (hero.x, hero.y))
+
+    def test_synthetic_click_on_popup_row_dispatches_action(self) -> None:
+        from spl.ui.pixel import iso
+
+        app = self._fhd_app()
+        app.manual = True
+        world = app.sim.world
+        spot = world.find_nearest(
+            app.sim.hero.pos, lambda p: world.tile_at(p) in {"grass", "beach"}
+        )
+        self.assertIsNotNone(spot)
+        app.sim.hero.pos = spot
+        cx, cy = iso.tile_center(spot.x, spot.y, app.offset_x, app.offset_y,
+                                 app.lay.sprite_scale)
+        # Clicking the hero's own tile opens the context popup...
+        app._handle_click(cx, cy)
+        self.assertIsNotNone(app.popup)
+        # ...render once so the popup row rects exist, then click the first row.
+        win = app.pg.Surface((app.lay.win_w, app.lay.win_h))
+        app.render(win)
+        rects = app.popup.get("rects", [])
+        self.assertTrue(rects, "popup produced no clickable row rects")
+        before_ap = app.sim.hero.ap_left
+        target = rects[0]
+        app._handle_click(target.centerx, target.centery)
+        # The action either ran (AP spent) or the popup closed — never crashed.
+        acted = app.popup is None or app.sim.hero.ap_left != before_ap
+        self.assertTrue(acted)
+
+    def test_synthetic_click_on_hud_button_toggles_pause(self) -> None:
+        app = self._fhd_app()
+        app._refresh_buttons()  # lay buttons out against the live layout
+        pause = next(b for b in app.buttons if b.key == "pause")
+        before = app.paused
+        app._handle_click(pause.rect.centerx, pause.rect.centery)
+        self.assertNotEqual(app.paused, before)
+
+    def test_render_runs_clean_across_all_seasons(self) -> None:
+        # Smoke test: the whole voxel pipeline (terrain cache + objects +
+        # atmosphere + UI) renders without error in every season/weather.
+        app = self._fhd_app()
+        win = app.pg.Surface((app.lay.win_w, app.lay.win_h))
+        for weather in ("sunny", "rain", "storm", "snow", "drought"):
+            for season_day in (2, 30, 58, 86):
+                app.sim.world.day = season_day
+                app.sim.world.weather = weather
+                app.render(win)  # must not raise
+
+
 if __name__ == "__main__":
     unittest.main()
 

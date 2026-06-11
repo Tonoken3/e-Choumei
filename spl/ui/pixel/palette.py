@@ -15,13 +15,45 @@ RGBA = tuple[int, int, int, int]
 
 @dataclass(frozen=True)
 class TilePalette:
-    """The colours a single tile type needs: a lit top face and a darker side
-    so the raised/iso tiles read as 3D, plus a couple of accent colours."""
+    """The colours a single tile type needs: a lit top face plus darker left and
+    right side faces (consistent sun) so each block reads as a flat-shaded
+    voxel, an edge line for definition, and an accent colour for texture.
+
+    Stage-4 voxel shading derives the side faces from ``top`` with a fixed sun:
+    left ≈ 72% brightness, right ≈ 52%. ``side`` is kept for back-compat (it
+    equals the left face) so older callers still work."""
 
     top: RGB
     side: RGB
     edge: RGB
     accent: RGB
+
+    @property
+    def left(self) -> RGB:
+        return shade(self.top, 0.72)
+
+    @property
+    def right(self) -> RGB:
+        return shade(self.top, 0.52)
+
+    @property
+    def line(self) -> RGB:
+        """Thin darker edge line between faces, for definition."""
+        return shade(self.top, 0.40)
+
+
+# Voxel face brightness (consistent sun): top is the lit base.
+FACE_LEFT = 0.72
+FACE_RIGHT = 0.52
+
+
+def shade(color: RGB, factor: float) -> RGB:
+    """Multiply an RGB toward black (factor<1) or white-ish (factor>1, clamped)."""
+    return tuple(max(0, min(255, int(round(c * factor)))) for c in color)  # type: ignore[return-value]
+
+
+def lighten(color: RGB, amount: int) -> RGB:
+    return tuple(max(0, min(255, c + amount)) for c in color)  # type: ignore[return-value]
 
 
 # --- UI ---------------------------------------------------------------------
@@ -131,37 +163,8 @@ CROP_COLORS: dict[str, RGB] = {
     "tomato": (212, 70, 60),     # red
     "pumpkin": (228, 142, 52),   # orange
 }
-CROP_LEAF: RGB = (84, 152, 72)
-CROP_SPARKLE: RGB = (255, 248, 196)
-
-
-# --- Tree / object accent colours per season --------------------------------
-def tree_canopy(season: str) -> RGB:
-    return {
-        "spring": (96, 174, 78),
-        "summer": (58, 134, 60),
-        "autumn": (214, 138, 48),
-        "winter": (44, 86, 64),  # dark pine
-    }[season]
-
-
-TREE_TRUNK: RGB = (96, 64, 40)
-TREE_SNOW: RGB = (236, 240, 246)
-
-HOUSE_WALL: RGB = (224, 206, 168)
-HOUSE_ROOF: RGB = (164, 78, 56)
-HOUSE_ROOF_DARK: RGB = (132, 58, 40)
-HOUSE_DOOR: RGB = (96, 64, 40)
-
-WORKSHOP_BENCH: RGB = (118, 128, 150)
-WORKSHOP_BENCH_DARK: RGB = (78, 88, 110)
-WORKSHOP_ANVIL: RGB = (64, 68, 80)
-
-HERO_TUNIC: RGB = (196, 72, 72)
-HERO_TUNIC_DARK: RGB = (150, 52, 52)
-HERO_SKIN: RGB = (236, 196, 158)
-HERO_HAIR: RGB = (62, 44, 36)
-HERO_OUTLINE: RGB = (30, 24, 28)
+# (CROP_LEAF / CROP_SPARKLE and per-object voxel colours live near the bottom,
+#  after the atmosphere tints — see the "Voxel object face colours" block.)
 
 
 # --- Atmosphere tints (RGBA, painted over the finished map) ------------------
@@ -187,3 +190,80 @@ WEATHER_TINT: dict[str, RGBA] = {
 RAIN_COLOR: RGB = (150, 184, 224)
 STORM_FLASH: RGBA = (255, 255, 255, 150)
 SNOW_COLOR: RGB = (244, 248, 252)
+
+
+# --- Sea / seabed backdrop (the slab floats in the sea) ---------------------
+def sea_backdrop(season: str) -> RGB:
+    """The open-sea colour filling the map band behind the island slab."""
+    if season == "winter":
+        return (74, 96, 124)
+    return (38, 84, 140)
+
+
+def seabed_color(season: str) -> RGB:
+    """The dark seabed slab the island's outer block sides drop down to."""
+    if season == "winter":
+        return (44, 60, 82)
+    return (24, 56, 96)
+
+
+# --- Voxel object face colours (derived top -> shaded faces in sprites) ------
+# Tree
+TREE_TRUNK_TOP: RGB = (132, 92, 58)
+TREE_SNOW: RGB = (236, 240, 246)
+TREE_SNOW_SIDE: RGB = (206, 212, 224)
+
+
+def tree_leaf_top(season: str) -> RGB:
+    return {
+        "spring": (110, 192, 92),
+        "summer": (70, 158, 72),
+        "autumn": (224, 150, 56),
+        "winter": (58, 104, 78),  # dark pine
+    }[season]
+
+
+def tree_leaf_accent(season: str) -> RGB:
+    # autumn gets a red-orange mix dabbed on; others a brighter highlight
+    return {
+        "spring": (150, 214, 120),
+        "summer": (104, 184, 96),
+        "autumn": (210, 86, 56),
+        "winter": (84, 132, 104),
+    }[season]
+
+
+# Rock voxel
+ROCK_TOP: RGB = (158, 158, 168)
+ROCK_MOSS: RGB = (108, 156, 86)       # summer mossy top dab
+ROCK_SNOW: RGB = (232, 238, 246)      # winter snow-dusted top
+
+# House voxel cottage
+HOUSE_WALL: RGB = (228, 210, 170)
+HOUSE_ROOF: RGB = (176, 84, 60)
+HOUSE_ROOF_DARK: RGB = (132, 58, 40)
+HOUSE_DOOR: RGB = (104, 70, 44)
+HOUSE_WINDOW: RGB = (150, 204, 226)
+
+# Workshop voxel: a light stone base, a warm wooden bench, a dark iron anvil so
+# the three cuboids read as distinct elements.
+WORKSHOP_BLOCK: RGB = (150, 156, 170)
+WORKSHOP_BENCH: RGB = (146, 108, 66)
+WORKSHOP_ANVIL: RGB = (58, 62, 76)
+
+# Hero (mini Roblox figure)
+HERO_SKIN: RGB = (240, 200, 162)
+HERO_HAIR: RGB = (66, 46, 38)
+HERO_TUNIC: RGB = (208, 76, 76)
+HERO_LEG: RGB = (66, 78, 110)
+HERO_OUTLINE: RGB = (30, 24, 28)
+
+# Merchant (blue robe + pack)
+MERCHANT_SKIN: RGB = (228, 196, 156)
+MERCHANT_ROBE: RGB = (74, 110, 196)
+MERCHANT_PACK: RGB = (150, 110, 70)
+
+# Field furrow + crop leaf
+FIELD_FURROW_DARK: int = 26  # how much darker the furrow grooves are
+CROP_LEAF: RGB = (118, 196, 96)   # bright green so sprouts pop on brown soil
+CROP_SPARKLE: RGB = (255, 248, 196)

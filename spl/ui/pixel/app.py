@@ -1,12 +1,26 @@
 from __future__ import annotations
 
-"""PixelApp: the 60fps game loop, map renderer, atmosphere, and controls.
+"""PixelApp: the 60fps game loop, voxel-world renderer, atmosphere, controls.
 
-The renderer reads the Simulation but only mutates it via ``sim.step(...)`` on
-the main thread. An optional LLM brain runs in a worker thread so the render
-loop never blocks; its chosen action is applied on the main thread when the
-thread returns. Particles use the ``random`` module freely — they are pure
-render decoration and never touch the deterministic sim RNG.
+Stage-4 rendering is **two-layer, both native-resolution**:
+
+* **Layer 1 (voxel world)** — the map (flat-shaded voxel blocks, recessed water,
+  voxel trees/rocks/crops/buildings, hero, merchant, weather particles, tints,
+  tile highlight, walk marker, hero locator) is drawn *directly into the
+  full-width map band* at native resolution (no low-res upscale). The static
+  terrain (all ground blocks, no objects) is composited once into a cached
+  full-map surface per (season, water-frame, field-set signature) and only
+  rebuilt when tiles/plots change; objects are blitted per frame on top in
+  painter's order.
+* **Layer 2 (crisp UI)** — all text and UI chrome (guide strip, HUD, button bar,
+  tooltips, bubbles, every overlay/popup) is drawn on the same window surface at
+  native resolution with antialiased fonts.
+
+The window defaults to Full HD 1920x1080, is resizable, and reflows on resize.
+``--scale`` is a window preset (0=auto / 1=small / 2=fhd / 3=large). The map is
+drawn at a discrete *sprite scale* (0.75/1.0/1.25/1.5) chosen so the island
+footprint fits the map band, keeping sprite caches bounded. The renderer reads
+the Simulation but only mutates it via ``sim.step(...)`` on the main thread.
 """
 
 import os
@@ -25,60 +39,82 @@ from spl.core.sim import PROJECT_ROOT, Simulation
 from . import iso
 from . import palette as pal
 from . import uihelp as uh
-from .hud import BUTTON_BAR_H, HUD_H, MAP_H, VIEW_H, VIEW_W, Fonts, Hud, Overlays
+from .hud import (
+    DEFAULT_WINDOW, WINDOW_PRESETS, Fonts, Hud, Overlays,
+    compute_layout, ui_scale_for,
+)
 from .sprites import SpriteFactory
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
     import pygame
 
-SCALE = 2
-WIN_W = VIEW_W * SCALE
-WIN_H = VIEW_H * SCALE
-
 SPEED_DELAYS = {1: 0.6, 2: 0.18, 3: 0.03}
 
-# Manual-mode key -> simple action (no args)
-_SIMPLE_KEYS = {
-    "x": "chop", "v": "mine", "q": "drink", "r": "rest", "z": "sleep",
-}
+# Fraction of the desktop the window is allowed to occupy when auto-sizing.
+_DESKTOP_FILL = 0.90
+# Auto picks FHD if the desktop is at least this big, else fits 90% of desktop.
+_FHD_MIN_DESKTOP = (2000, 1130)
 
 
 @dataclass
 class Particles:
     """Render-only weather particles, recycled. Uses the stdlib random module
-    (never the sim RNG)."""
+    (never the sim RNG). Particle coords are in *map-band* (window) pixels and
+    are sized for the bigger native-res view (~2x stage-3)."""
 
+    band_w: int = 1920
+    band_h: int = 900
     rng: random.Random = field(default_factory=lambda: random.Random(1234))
     rain: list[list[float]] = field(default_factory=list)
     snow: list[list[float]] = field(default_factory=list)
     flash_timer: float = 0.0
 
+    def resize(self, band_w: int, band_h: int) -> None:
+        self.band_w, self.band_h = max(1, band_w), max(1, band_h)
+        self.rain.clear()
+        self.snow.clear()
+
     def ensure_rain(self, n: int) -> None:
         while len(self.rain) < n:
-            self.rain.append([self.rng.uniform(0, VIEW_W), self.rng.uniform(0, MAP_H)])
+            self.rain.append([self.rng.uniform(0, self.band_w),
+                              self.rng.uniform(0, self.band_h)])
 
     def ensure_snow(self, n: int) -> None:
         while len(self.snow) < n:
-            self.snow.append([self.rng.uniform(0, VIEW_W), self.rng.uniform(0, MAP_H),
+            self.snow.append([self.rng.uniform(0, self.band_w),
+                              self.rng.uniform(0, self.band_h),
                               self.rng.uniform(-0.3, 0.3)])
 
     def update_rain(self, dt: float, speed: float) -> None:
-        self.ensure_rain(80)
+        self.ensure_rain(160)
         for p in self.rain:
             p[1] += speed * dt
             p[0] += speed * 0.3 * dt
-            if p[1] > MAP_H:
-                p[0] = self.rng.uniform(0, VIEW_W)
-                p[1] = -4
+            if p[1] > self.band_h:
+                p[0] = self.rng.uniform(0, self.band_w)
+                p[1] = -8
 
     def update_snow(self, dt: float) -> None:
-        self.ensure_snow(60)
+        self.ensure_snow(120)
         for p in self.snow:
-            p[1] += 22 * dt
-            p[0] += p[2] * 14 * dt
-            if p[1] > MAP_H:
-                p[0] = self.rng.uniform(0, VIEW_W)
-                p[1] = -4
+            p[1] += 30 * dt
+            p[0] += p[2] * 20 * dt
+            if p[1] > self.band_h:
+                p[0] = self.rng.uniform(0, self.band_w)
+                p[1] = -8
+
+
+def choose_window(desktop_w: int, desktop_h: int, forced: int = 0) -> tuple[int, int]:
+    """Window size from the --scale preset. 1/2/3 = small/fhd/large; 0 = auto:
+    pick FHD if the desktop is big enough, else fit 90% of the desktop with a
+    16:9-ish window."""
+    if forced in WINDOW_PRESETS:
+        return WINDOW_PRESETS[forced]
+    if desktop_w >= _FHD_MIN_DESKTOP[0] and desktop_h >= _FHD_MIN_DESKTOP[1]:
+        return DEFAULT_WINDOW
+    w = int(desktop_w * _DESKTOP_FILL)
+    h = int(desktop_h * _DESKTOP_FILL)
+    return max(960, w), max(600, h)
 
 
 class PixelApp:
@@ -86,9 +122,6 @@ class PixelApp:
         import pygame
 
         self.pg = pygame
-        # pygame.init() is idempotent; do it here so font/display are ready
-        # before we build Fonts/Surfaces (run_window/run_shots call it again,
-        # which is harmless).
         pygame.init()
         self.headless = headless
         self.args = args
@@ -100,15 +133,20 @@ class PixelApp:
         if start_day > 1:
             self._fast_forward(start_day)
 
+        # -- window preset + layout -----------------------------------------
+        self.forced_scale = int(getattr(args, "scale", 0) or 0)
+        win_w, win_h = self._initial_window()
+        ui = ui_scale_for(win_h)
+        self.fonts = Fonts(pygame, scale=ui)
+        # sprite scale is chosen against the map band -> need a provisional lay
+        self.lay = compute_layout(pygame, win_w, win_h, 1.0)
         self.factory = SpriteFactory(pygame)
-        self.fonts = Fonts(pygame)
         self.hud = Hud(pygame, self.fonts)
         self.overlays = Overlays(pygame, self.fonts)
         self.particles = Particles()
-
-        self.offset_x, self.offset_y = iso.centering_offset(
-            self.sim.world.width, self.sim.world.height, VIEW_W, MAP_H
-        )
+        self._terrain: "pygame.Surface | None" = None
+        self._terrain_sig: tuple | None = None
+        self._apply_window(win_w, win_h)
 
         # modes / state
         self.manual = bool(getattr(args, "manual", False))
@@ -121,26 +159,26 @@ class PixelApp:
         self.running = True
 
         # -- mouse / click-to-act state --------------------------------------
-        self.mouse_pos = (0, 0)            # internal-surface coords
+        # mouse_win: window coords. mouse_map: internal-map coords (or None when
+        # the cursor is outside the map band).
+        self.mouse_win = (0, 0)
+        self.mouse_map: tuple[int, int] | None = (0, 0)
         self.hover_tile: Position | None = None
-        # popup: dict(kind=tile|trade, tile, header, items, anchor, hover, rects)
+        # popup: dict(kind, tile, header, items, anchor(window coords), hover, rects)
         self.popup: dict | None = None
-        # transient hit-rects produced by the last render of overlays/popups;
-        # the next frame's click handler reads these (immediate-mode style).
         self._hits: dict[str, object] = {}
-        self._overlay_hover = -1            # hovered craft/eat row index
+        self._overlay_hover = -1
         self.button_hover: str | None = None
         # auto-walk
         self.walk_target: Position | None = None
         self._last_walk_t = 0.0
-        # first-seconds hero locator + guide
         self._session_start = 0.0
         self.buttons = self._build_buttons()
 
         # animation / timing
         self.anim_t = 0.0
         self.last_action_t = 0.0
-        self.fade = 0.0  # 0..1 black fade for day change
+        self.fade = 0.0
         self._last_day = self.sim.world.day
 
         # speech bubble tracking
@@ -158,6 +196,57 @@ class PixelApp:
         self._pending_action: GameAction | None = None
         self._thread_busy = False
         self._thread_lock = threading.Lock()
+
+    # -- window / scale / layout --------------------------------------------
+    def _initial_window(self) -> tuple[int, int]:
+        try:
+            sizes = self.pg.display.get_desktop_sizes()
+            dw, dh = sizes[0]
+        except Exception:  # noqa: BLE001 - headless/dummy driver may not report
+            dw, dh = 1920, 1080
+        return choose_window(dw, dh, self.forced_scale)
+
+    def _apply_window(self, win_w: int, win_h: int) -> None:
+        """(Re)build fonts, layout, sprite factory and world offsets for a new
+        window size. Picks a discrete sprite scale so the island fits the band,
+        rebuilds the factory only when that scale changes, and invalidates the
+        cached terrain."""
+        ui = ui_scale_for(win_h)
+        self.fonts.for_scale(ui)
+        # provisional layout to know the map band, then pick the sprite zoom
+        lay0 = compute_layout(self.pg, win_w, win_h, 1.0)
+        world = self.sim.world
+        sprite_scale = iso.fit_scale(world.width, world.height,
+                                     lay0.map_rect.width, lay0.map_rect.height,
+                                     headroom=int(120 * ui / 2))
+        self.lay = compute_layout(self.pg, win_w, win_h, sprite_scale)
+        if abs(self.factory.scale - sprite_scale) > 1e-6:
+            self.factory = SpriteFactory(self.pg, scale=sprite_scale)
+        self._recompute_offsets()
+        self.particles.resize(self.lay.map_rect.width, self.lay.map_rect.height)
+        self._terrain = None
+        self._terrain_sig = None
+        self.buttons = self._build_buttons()
+
+    def _recompute_offsets(self) -> None:
+        """World-to-screen offsets in *map-band* (window) coordinates."""
+        lay = self.lay
+        world = self.sim.world
+        sc = lay.sprite_scale
+        overhang = int(round(48 * sc))  # headroom for tall sprites above ground
+        ox, oy = iso.centering_offset(world.width, world.height,
+                                      lay.map_rect.width, lay.map_rect.height,
+                                      sc, overhang_top=overhang)
+        # express in window coords (map band starts at map_rect.topleft)
+        self.offset_x = ox + lay.map_rect.x
+        self.offset_y = oy + lay.map_rect.y
+
+    def _resize(self, win_w: int, win_h: int) -> None:
+        """On VIDEORESIZE: reflow to the new window size (UI scale follows the
+        window height; the sprite zoom is re-chosen to fit the band)."""
+        win_w = max(960, win_w)
+        win_h = max(600, win_h)
+        self._apply_window(win_w, win_h)
 
     # -- brain ---------------------------------------------------------------
     def _make_brain(self):
@@ -182,10 +271,10 @@ class PixelApp:
 
     # -- HUD button bar layout ----------------------------------------------
     def _build_buttons(self) -> list:
-        """Lay out the HUD button bar once. Rects are in internal coords along
-        the top BUTTON_BAR_H strip of the HUD panel. Labels with a ⇔/flip state
-        are refreshed each frame in ``_refresh_buttons``."""
+        """Lay out the HUD button bar (window coords) along the top button-bar
+        strip of the HUD panel. Dynamic labels are refreshed each frame."""
         f = self.fonts
+        lay = self.lay
         specs = [
             ("pause", f.jp("一時停止", "Pause"), f.jp("自動進行を止める/再開", "pause/resume")),
             ("speed", f.jp("速度:普", "Speed:Nrm"), f.jp("観戦の速さを変える", "cycle watch speed")),
@@ -196,21 +285,24 @@ class PixelApp:
             ("heaven", f.jp("天の声", "Heaven"), f.jp("英雄に助言する", "advise the hero")),
             ("help", f.jp("ヘルプ", "Help"), f.jp("操作の説明", "how to play")),
         ]
-        x = 6
-        y = MAP_H + 2
-        h = BUTTON_BAR_H - 4
-        gap = 4
+        x = lay.map_rect.x + lay.px(6)
+        y = lay.hud_top + lay.px(3)
+        h = lay.button_bar_h - lay.px(6)
+        gap = lay.px(4)
+        pad = lay.px(14)
         buttons = []
         for key, label, tip in specs:
-            w = f.label.size(label)[0] + 14
+            w = f.label.size(label)[0] + pad
             rect = self.pg.Rect(x, y, w, h)
             buttons.append(uh.Button(key, label, tip, rect=rect))
             x += w + gap
         return buttons
 
     def _refresh_buttons(self) -> None:
-        """Update dynamic labels (pause/speed) and enabled state per mode."""
+        """Update dynamic labels (pause/speed) and enabled state per mode, then
+        recompute widths/positions in window coords."""
         f = self.fonts
+        lay = self.lay
         speed_jp = {1: "遅", 2: "普", 3: "速"}[self.speed]
         speed_en = {1: "Slow", 2: "Nrm", 3: "Fast"}[self.speed]
         for b in self.buttons:
@@ -218,16 +310,17 @@ class PixelApp:
                 b.label = f.jp("再開", "Resume") if self.paused else f.jp("一時停止", "Pause")
             elif b.key == "speed":
                 b.label = f.jp(f"速度:{speed_jp}", f"Speed:{speed_en}")
-            # In watch mode, eat/craft belong to manual play — grey them out.
             if b.key in {"craft", "eat"}:
                 b.enabled = self.manual
-        # recompute widths for the two relabelled buttons, keep bar left-aligned
-        x = 6
+        x = lay.map_rect.x + lay.px(6)
+        y = lay.hud_top + lay.px(3)
+        h = lay.button_bar_h - lay.px(6)
+        gap = lay.px(4)
+        pad = lay.px(14)
         for b in self.buttons:
-            w = f.label.size(b.label)[0] + 14
-            b.rect.width = w
-            b.rect.x = x
-            x += w + 4
+            w = f.label.size(b.label)[0] + pad
+            b.rect.update(x, y, w, h)
+            x += w + gap
 
     # -- replay (result panel) ----------------------------------------------
     def _rebuild_sim(self) -> None:
@@ -238,9 +331,9 @@ class PixelApp:
         )
         if self.brain is not None:
             self.sim.set_diarist(self.brain)
-        self.offset_x, self.offset_y = iso.centering_offset(
-            self.sim.world.width, self.sim.world.height, VIEW_W, MAP_H
-        )
+        self._recompute_offsets()
+        self._terrain = None
+        self._terrain_sig = None
         self.popup = None
         self.walk_target = None
         self.overlay = None
@@ -249,58 +342,72 @@ class PixelApp:
         self._spoken_index = len(self.sim.hero.spoken_lines)
         self._bubble_text = ""
         self._bubble_until = 0.0
-        self._session_start = self.anim_t  # re-trigger the hero locator
+        self._session_start = self.anim_t
 
-    # -- mouse helpers -------------------------------------------------------
-    def _to_internal(self, wx: int, wy: int) -> tuple[int, int]:
-        return wx // SCALE, wy // SCALE
-
-    def _tile_under(self, ix: int, iy: int) -> Position | None:
-        if iy >= MAP_H:
+    # -- coordinate helpers --------------------------------------------------
+    # The world is now drawn directly into the map band at native resolution, so
+    # window coords == world-screen coords (within the band). These wrappers stay
+    # for call-site clarity and so picking can clamp to the band.
+    def _win_to_map(self, wx: int, wy: int) -> tuple[int, int] | None:
+        """Window pixel within the map band, or None if outside it."""
+        r = self.lay.map_rect
+        if not r.collidepoint(wx, wy):
             return None
-        tile = iso.screen_to_tile(ix, iy, self.offset_x, self.offset_y)
+        return wx, wy
+
+    def _map_to_win(self, mx: int, my: int) -> tuple[int, int]:
+        """Identity now (world is drawn in window coords)."""
+        return mx, my
+
+    def _tile_under(self, mx: int, my: int) -> Position | None:
+        if my >= self.lay.map_rect.bottom:
+            return None
+        tile = iso.screen_to_tile(mx, my, self.offset_x, self.offset_y,
+                                  self.lay.sprite_scale)
         if not self.sim.world.in_bounds(tile):
             return None
         return tile
 
     # -- mouse: motion -------------------------------------------------------
     def _handle_motion(self, wx: int, wy: int) -> None:
-        ix, iy = self._to_internal(wx, wy)
-        self.mouse_pos = (ix, iy)
-        self.hover_tile = self._tile_under(ix, iy)
-        self.button_hover = self._button_at(ix, iy)
-        # popup row hover
+        self.mouse_win = (wx, wy)
+        self.mouse_map = self._win_to_map(wx, wy)
+        if self.mouse_map is not None:
+            self.hover_tile = self._tile_under(*self.mouse_map)
+        else:
+            self.hover_tile = None
+        self.button_hover = self._button_at(wx, wy)
+        # popup row hover (window coords)
         if self.popup is not None:
             self.popup["hover"] = -1
             for i, r in enumerate(self.popup.get("rects", [])):
-                if r.collidepoint(ix, iy):
+                if r.collidepoint(wx, wy):
                     self.popup["hover"] = i
                     break
-        # overlay row hover (craft / eat) stored as a simple index
+        # overlay row hover (craft / eat) — rects are window coords
         self._overlay_hover = -1
         rows = self._hits.get("rows")
         if rows:
             for i, entry in enumerate(rows):
                 r = entry[0]
-                if r.collidepoint(ix, iy):
+                if r.collidepoint(wx, wy):
                     self._overlay_hover = i
                     break
 
-    def _button_at(self, ix: int, iy: int) -> str | None:
+    def _button_at(self, wx: int, wy: int) -> str | None:
         for b in self.buttons:
-            if b.enabled and b.rect.collidepoint(ix, iy):
+            if b.enabled and b.rect.collidepoint(wx, wy):
                 return b.key
         return None
 
     # -- mouse: click --------------------------------------------------------
     def _handle_click(self, wx: int, wy: int) -> None:
-        ix, iy = self._to_internal(wx, wy)
         # 1) overlays consume clicks first (result panel always active when done)
         if self.sim.done:
-            self._click_result(ix, iy)
+            self._click_result(wx, wy)
             return
         if self.overlay is not None:
-            self._click_overlay(ix, iy)
+            self._click_overlay(wx, wy)
             return
         # 2) auto-walking: any click interrupts (spec: "クリックで中断")
         if self.walk_target is not None:
@@ -308,24 +415,25 @@ class PixelApp:
             return
         # 3) open popup? click on its row?
         if self.popup is not None:
-            self._click_popup(ix, iy)
+            self._click_popup(wx, wy)
             return
         # 4) HUD button bar
-        btn = self._button_at(ix, iy)
+        btn = self._button_at(wx, wy)
         if btn is not None:
             self._activate_button(btn)
             return
         # 5) a map tile -> open the context popup
-        if iy < MAP_H:
-            tile = self._tile_under(ix, iy)
+        mp = self._win_to_map(wx, wy)
+        if mp is not None:
+            tile = self._tile_under(*mp)
             if tile is not None:
-                self._open_tile_popup(tile, (ix, iy))
+                self._open_tile_popup(tile, (wx, wy))
 
     def _open_tile_popup(self, tile: Position, anchor: tuple) -> None:
+        """``anchor`` is in window coords (where the popup is drawn)."""
         f = self.fonts
         header = self._tile_header(tile)
         if not self.manual:
-            # WATCH: info-only popup with a single "switch to manual" button.
             items = [uh.MenuItem(f.jp("手動モードに切り替えて操作", "Switch to manual to act"),
                                  "switch_mode")]
             self.popup = {"kind": "tile", "tile": tile, "header": header,
@@ -348,10 +456,10 @@ class PixelApp:
             return f"{name}（" + f.jp("現在地", "you") + "）"
         return name
 
-    def _click_popup(self, ix: int, iy: int) -> None:
+    def _click_popup(self, wx: int, wy: int) -> None:
         rects = self.popup.get("rects", [])
         for i, r in enumerate(rects):
-            if r.collidepoint(ix, iy):
+            if r.collidepoint(wx, wy):
                 self._activate_menu_item(self.popup["items"][i])
                 return
         # clicked outside the popup -> close
@@ -380,12 +488,10 @@ class PixelApp:
                           "hover": -1, "rects": [], "info_only": False}
             return
         if verb == "move_to":
-            # start an auto-walk to the chosen tile
             self.walk_target = Position(int(item.args["x"]), int(item.args["y"]))
             self._last_walk_t = self.anim_t
             self.popup = None
             return
-        # a direct GameAction
         self.sim.step(GameAction.safe(verb, **item.args), confuse_on_invalid=False)
         self.popup = None
 
@@ -412,24 +518,24 @@ class PixelApp:
         elif key == "help":
             self.overlay = "help"
 
-    def _click_overlay(self, ix: int, iy: int) -> None:
+    def _click_overlay(self, wx: int, wy: int) -> None:
         from spl.core.actions import GameAction as _GA
 
         if self.overlay == "craft":
             rows = self._hits.get("rows") or []
             for (r, recipe, affordable) in rows:
-                if r.collidepoint(ix, iy):
+                if r.collidepoint(wx, wy):
                     if affordable:
                         action = "build" if recipe.kind == "build" else "craft"
                         self.sim.step(_GA.safe(action, recipe=recipe.key),
                                       confuse_on_invalid=False)
                     return
-            self.overlay = None  # clicked outside any row -> close
+            self.overlay = None
             return
         if self.overlay == "eat":
             rows = self._hits.get("rows") or []
             for (r, item) in rows:
-                if r.collidepoint(ix, iy):
+                if r.collidepoint(wx, wy):
                     self.sim.step(_GA.safe("eat", item=item), confuse_on_invalid=False)
                     self.overlay = None
                     return
@@ -437,28 +543,24 @@ class PixelApp:
             return
         if self.overlay == "heaven":
             send = self._hits.get("heaven_send")
-            if send is not None and send.collidepoint(ix, iy):
+            if send is not None and send.collidepoint(wx, wy):
                 self.sim.advice_from_heaven = self.heaven_text.strip() or None
                 self.overlay = None
             return
-        # diary / help: any click closes
         if self.overlay in {"diary", "help"}:
             self.overlay = None
 
-    def _click_result(self, ix: int, iy: int) -> None:
+    def _click_result(self, wx: int, wy: int) -> None:
         rects = self._hits.get("result") or {}
         again = rects.get("again")
         quit_b = rects.get("quit")
-        if again is not None and again.collidepoint(ix, iy):
+        if again is not None and again.collidepoint(wx, wy):
             self._rebuild_sim()
-        elif quit_b is not None and quit_b.collidepoint(ix, iy):
+        elif quit_b is not None and quit_b.collidepoint(wx, wy):
             self.running = False
 
     # -- auto-walk -----------------------------------------------------------
     def _walk_step(self, now: float) -> None:
-        """Issue one move-toward-target every ~0.12s while auto-walking; stop on
-        arrival, a failed move (AP out), or sim done. A click/key clears the
-        target elsewhere."""
         if self.walk_target is None or self.sim.done:
             return
         if self.sim.hero.pos == self.walk_target:
@@ -489,7 +591,6 @@ class PixelApp:
         if self.sim.done:
             return
         if self.llm_enabled and self.brain is not None:
-            # apply a finished request, then maybe launch a new one on the timer
             with self._thread_lock:
                 pending = self._pending_action
                 self._pending_action = None
@@ -551,7 +652,6 @@ class PixelApp:
     def _handle_key(self, key) -> None:
         pg = self.pg
 
-        # Result screen: Space/Enter -> replay same island, Esc/Q -> quit.
         if self.sim.done:
             if key in (pg.K_SPACE, pg.K_RETURN):
                 self._rebuild_sim()
@@ -559,7 +659,6 @@ class PixelApp:
                 self.running = False
             return
 
-        # heaven's-voice text input captures most keys
         if self.overlay == "heaven":
             if key == pg.K_RETURN:
                 self.sim.advice_from_heaven = self.heaven_text.strip() or None
@@ -574,8 +673,6 @@ class PixelApp:
                     self.heaven_text += ch
             return
 
-        # Click-to-act popup: Space/Esc close, Enter activates the first row,
-        # Up/Down navigate.
         if self.popup is not None:
             items = self.popup["items"]
             if key in (pg.K_ESCAPE, pg.K_SPACE):
@@ -632,7 +729,6 @@ class PixelApp:
                 self.overlay = None
             return
 
-        # no overlay: global + mode keys
         if key == pg.K_h:
             self.overlay = "help"
             return
@@ -655,8 +751,6 @@ class PixelApp:
             self.speed = {pg.K_1: 1, pg.K_2: 2, pg.K_3: 3}[key]
             return
         if key == pg.K_SPACE:
-            # Space pauses the watch loop; in manual it is a no-op toggle that
-            # still feels consistent (nothing auto-steps in manual).
             self.paused = not self.paused
             return
         if self.manual:
@@ -666,8 +760,6 @@ class PixelApp:
         if self.sim.done:
             return
         pg = self.pg
-        # Arrows + WASD move one tile. (D/H/C/T/M etc. are intercepted earlier
-        # in _handle_key, so they never reach here as movement.)
         move_map = {
             pg.K_UP: "north", pg.K_w: "north",
             pg.K_DOWN: "south", pg.K_s: "south",
@@ -700,67 +792,130 @@ class PixelApp:
     def _frame_index(self) -> int:
         return int(self.anim_t * 2) % 2  # ~2 fps idle bob / shimmer
 
-    def render(self, surf) -> None:
+    def render(self, window) -> None:
+        """Two-layer composite, both native-res: draw the voxel world directly
+        into the map band (Layer 1), then all crisp UI on the window (Layer 2)."""
+        lay = self.lay
+
+        # -- Layer 1: the voxel world (drawn into the map-band subsurface) ---
+        window.fill(pal.UI_BG)
+        band = window.subsurface(lay.map_rect)
+        self._render_world(band)
+
+        # -- Layer 2: crisp UI ----------------------------------------------
+        self._refresh_buttons()
+        self.hud.draw(window, self.sim, self.sim.score(), lay)
+        self.overlays.draw_button_bar(window, self.buttons, self.button_hover, lay)
+        self._draw_window_cursor(window)
+        self._draw_guide(window)
+        self._draw_bubbles(window)
+        self._draw_overlay(window)
+
+    # -- static terrain cache ------------------------------------------------
+    def _tiles_signature(self) -> tuple:
+        world = self.sim.world
+        rows = tuple("".join(row) for row in world.tiles)
+        return (world.season, world.width, world.height,
+                self.lay.sprite_scale, self.offset_x, self.offset_y, rows)
+
+    def _ensure_terrain(self) -> "pygame.Surface":
+        """Compose all ground blocks (no objects, no shimmer) into one cached
+        full-map surface, in *map-band* coords. Rebuilt only when the tiles /
+        season / scale / offsets change."""
+        sig = self._tiles_signature()
+        if self._terrain is not None and self._terrain_sig == sig:
+            return self._terrain
+        pg = self.pg
+        lay = self.lay
+        world = self.sim.world
+        season = world.season
+        surf = pg.Surface(lay.map_rect.size, pg.SRCALPHA)
+        # map-band-local offsets (subtract the band origin)
+        ox = self.offset_x - lay.map_rect.x
+        oy = self.offset_y - lay.map_rect.y
+        sc = lay.sprite_scale
+        w, h = world.width, world.height
+        for (x, y) in iso.painter_order(w, h):
+            tile = world.tiles[y][x]
+            base = "forest" if tile == "forest" else tile
+            edge = (x == 0 or y == 0 or x == w - 1 or y == h - 1)
+            ground = self.factory.ground(base, season, edge=edge)
+            sx, sy = iso.tile_to_screen(x, y, ox, oy, sc)
+            recess = self.factory.ground_top_y(tile)
+            surf.blit(ground, (sx, sy - recess))
+        self._terrain = surf
+        self._terrain_sig = sig
+        return surf
+
+    def _render_world(self, surf) -> None:
+        """Draw the voxel world into the map band (band-local coords)."""
         pg = self.pg
         world = self.sim.world
         season = world.season
         frame = self._frame_index()
-        surf.fill(pal.UI_BG)
-        # sky/sea backdrop for the map area
-        pg.draw.rect(surf, (28, 40, 64) if season != "winter" else (40, 48, 64),
-                     (0, 0, VIEW_W, MAP_H))
+        lay = self.lay
+        # sea/seabed backdrop, then the cached terrain slab on top
+        surf.fill(pal.sea_backdrop(season))
+        surf.blit(self._ensure_terrain(), (0, 0))
 
-        hero = self.sim.hero
-        # painter's order: draw ground, then objects/crops/hero per cell.
+        ox = self.offset_x - lay.map_rect.x
+        oy = self.offset_y - lay.map_rect.y
+        sc = lay.sprite_scale
+        # animated water shimmer + per-cell objects, in painter's order on top
         for (x, y) in iso.painter_order(world.width, world.height):
             tile = world.tiles[y][x]
-            base = "forest" if tile == "forest" else tile
-            ground = self.factory.ground(base, season)
-            sx, sy = iso.tile_to_screen(x, y, self.offset_x, self.offset_y)
-            surf.blit(ground, (sx, sy))
+            sx, sy = iso.tile_to_screen(x, y, ox, oy, sc)
             if tile == "water":
+                recess = self.factory.ground_top_y(tile)
                 surf.blit(self.factory.water_overlay(season, frame), (sx, sy))
-            cx, cy = iso.tile_center(x, y, self.offset_x, self.offset_y)
+            cx, cy = iso.tile_center(x, y, ox, oy, sc)
+            cy -= self.factory.ground_top_y(tile)  # anchor to the (recessed) top
             self._draw_cell_objects(surf, x, y, tile, season, frame, cx, cy)
 
         self._draw_atmosphere(surf)
         self._draw_map_cursor(surf)
-        self._refresh_buttons()
-        self.hud.draw(surf, self.sim, self.sim.score())
-        self.overlays.draw_button_bar(surf, self.buttons, self.button_hover)
-        self._draw_guide(surf)
-        self._draw_bubbles(surf)
-        self._draw_overlay(surf)
 
     def _draw_cell_objects(self, surf, x, y, tile, season, frame, cx, cy) -> None:
         pos = Position(x, y)
         world = self.sim.world
-        # static tile objects anchored with their base at the tile centre
+        s2 = self.factory._s(2)
         if tile == "forest":
-            spr = self.factory.tree(season)
-            surf.blit(spr, (cx - spr.get_width() // 2, cy - spr.get_height() + 4))
+            spr = self.factory.tree(season, variant=(x * 31 + y * 17) & 0xFF)
+            surf.blit(spr, (cx - spr.get_width() // 2, cy - spr.get_height() + s2))
+        elif tile == "rock":
+            spr = self.factory.rock_object(season, variant=(x * 13 + y * 7) & 0xFF)
+            surf.blit(spr, (cx - spr.get_width() // 2, cy - spr.get_height() + s2))
         elif tile == "home":
             spr = self.factory.house()
-            surf.blit(spr, (cx - spr.get_width() // 2, cy - spr.get_height() + 6))
+            surf.blit(spr, (cx - spr.get_width() // 2, cy - spr.get_height() + s2))
         elif tile == "workshop":
             spr = self.factory.workshop()
-            surf.blit(spr, (cx - spr.get_width() // 2, cy - spr.get_height() + 6))
+            surf.blit(spr, (cx - spr.get_width() // 2, cy - spr.get_height() + s2))
 
-        # crop overlay
         plot = world.plots.get(pos)
         if plot is not None:
             stage = self._crop_stage(plot)
             spr = self.factory.crop(plot.crop, stage, frame)
-            surf.blit(spr, (cx - spr.get_width() // 2, cy - spr.get_height() + 4))
+            surf.blit(spr, (cx - spr.get_width() // 2, cy - spr.get_height() + s2))
 
-        # merchant marker near the home when an offer is active
-        if self.sim.current_offer is not None and pos == Position(world.width // 2 + 1, world.height // 2 + 0):
-            pass  # merchant drawn at hero-adjacent grass below if needed
+        # Merchant stands one tile off the hero while an offer is live.
+        if self.sim.current_offer is not None and pos == self._merchant_pos():
+            spr = self.factory.merchant()
+            surf.blit(spr, (cx - spr.get_width() // 2, cy - spr.get_height() + s2))
 
-        # hero (drawn in its own cell so painter order keeps it correct)
         if self.sim.hero.pos == pos:
             spr = self.factory.hero(frame)
-            surf.blit(spr, (cx - spr.get_width() // 2, cy - spr.get_height() + 3))
+            surf.blit(spr, (cx - spr.get_width() // 2, cy - spr.get_height() + s2))
+
+    def _merchant_pos(self) -> Position:
+        """A deterministic tile next to the hero to stand the merchant on."""
+        world = self.sim.world
+        for _, npos in world.neighbors(self.sim.hero.pos):
+            if world.tile_at(npos) in {"grass", "beach", "field"}:
+                return npos
+        for _, npos in world.neighbors(self.sim.hero.pos):
+            return npos
+        return self.sim.hero.pos
 
     def _crop_stage(self, plot) -> int:
         if plot.ready:
@@ -775,34 +930,53 @@ class PixelApp:
             return 1
         return 2
 
-    def _hero_screen_anchor(self) -> tuple[int, int]:
+    def _hero_win_anchor(self) -> tuple[int, int]:
+        """Top of the hero sprite, in window coords (for Layer-2 bubbles)."""
         hero = self.sim.hero
-        cx, cy = iso.tile_center(hero.pos.x, hero.pos.y, self.offset_x, self.offset_y)
-        return cx, cy - 16  # top of the hero sprite
+        cx, cy = iso.tile_center(hero.pos.x, hero.pos.y, self.offset_x, self.offset_y,
+                                 self.lay.sprite_scale)
+        spr_h = self.factory.hero(0).get_height()
+        return cx, cy - spr_h + self.factory._s(2)
 
-    # -- map cursor / overlays-on-map ---------------------------------------
+    # -- world-layer cursor (top-face outlines, band-local coords) -----------
     def _draw_map_cursor(self, surf) -> None:
-        """Hero locator (first seconds), auto-walk marker, hover highlight +
-        tooltip. Skipped when the sim is over (result panel owns the screen)."""
+        """Hero locator, auto-walk marker, hover highlight — drawn as top-face
+        diamond outlines on the world layer. The hover *tooltip* is Layer 2."""
         if self.sim.done:
             return
-        # first ~10s: pulsing white outline on the hero's tile
+        lay = self.lay
+        ox = self.offset_x - lay.map_rect.x
+        oy = self.offset_y - lay.map_rect.y
+        sc = lay.sprite_scale
+        hw, hh = iso.half_w(sc), iso.half_h(sc)
+        lw = max(2, int(round(2 * sc)))
+
+        def top_center(p: Position, tile_kind: str) -> tuple[int, int]:
+            cx, cy = iso.tile_center(p.x, p.y, ox, oy, sc)
+            return cx, cy - self.factory.ground_top_y(tile_kind)
+
+        world = self.sim.world
         if self.anim_t - self._session_start < 10.0:
-            hcx, hcy = iso.tile_center(self.sim.hero.pos.x, self.sim.hero.pos.y,
-                                       self.offset_x, self.offset_y)
-            self.overlays.draw_hero_locator(surf, hcx, hcy, self.anim_t * 1.4)
-        # auto-walk target marker
+            hp = self.sim.hero.pos
+            cx, cy = top_center(hp, world.tile_at(hp))
+            self.overlays.draw_hero_locator(surf, cx, cy, hw, hh, self.anim_t * 1.4, lw)
         if self.walk_target is not None:
-            wx, wy = iso.tile_center(self.walk_target.x, self.walk_target.y,
-                                     self.offset_x, self.offset_y)
-            self.overlays.draw_walk_marker(surf, wx, wy, (self.anim_t * 1.6) % 1.0)
-        # hover highlight + tooltip (suppressed while an overlay/popup is open)
+            wt = self.walk_target
+            cx, cy = top_center(wt, world.tile_at(wt))
+            self.overlays.draw_walk_marker(surf, cx, cy, hw, hh, (self.anim_t * 1.6) % 1.0, lw)
         if self.overlay is None and self.popup is None and self.hover_tile is not None:
-            cx, cy = iso.tile_center(self.hover_tile.x, self.hover_tile.y,
-                                     self.offset_x, self.offset_y)
-            self.overlays.draw_tile_highlight(surf, cx, cy)
-            self.overlays.draw_tooltip(surf, self.mouse_pos[0], self.mouse_pos[1],
-                                       self._tooltip_lines(self.hover_tile))
+            ht = self.hover_tile
+            cx, cy = top_center(ht, world.tile_at(ht))
+            self.overlays.draw_tile_highlight(surf, cx, cy, hw, hh, width=lw)
+
+    # -- Layer-2 cursor tooltip (crisp, on the window) -----------------------
+    def _draw_window_cursor(self, window) -> None:
+        if self.sim.done:
+            return
+        if (self.overlay is None and self.popup is None and self.hover_tile is not None
+                and self.mouse_map is not None):
+            self.overlays.draw_tooltip(window, self.mouse_win[0], self.mouse_win[1],
+                                       self._tooltip_lines(self.hover_tile), self.lay)
 
     def _tooltip_lines(self, tile: Position) -> list:
         f = self.fonts
@@ -817,8 +991,8 @@ class PixelApp:
             lines.append(f.jp("クリックで行動", "click to act"))
         return lines
 
-    def _draw_guide(self, surf) -> None:
-        """Context guide strip across the top of the map area."""
+    def _draw_guide(self, window) -> None:
+        """Context guide strip across the top of the map band (Layer 2)."""
         if self.sim.done:
             return
         f = self.fonts
@@ -835,61 +1009,68 @@ class PixelApp:
                         "click a tile to act / buttons below: diary, craft, eat")
         else:
             return
-        self.overlays.draw_guide(surf, text)
+        self.overlays.draw_guide(window, text, self.lay)
 
-    # -- atmosphere ----------------------------------------------------------
+    # -- atmosphere (world layer: band-local coords) -------------------------
+    def _band_size(self) -> tuple[int, int]:
+        return self.lay.map_rect.width, self.lay.map_rect.height
+
     def _draw_atmosphere(self, surf) -> None:
         pg = self.pg
         world = self.sim.world
         weather = world.weather
-        season = world.season
+        bw, bh = self._band_size()
 
-        # weather particles + tint (clipped to the map area)
-        clip = pg.Rect(0, 0, VIEW_W, MAP_H)
         if weather in pal.WEATHER_TINT:
-            tint = pg.Surface((VIEW_W, MAP_H), pg.SRCALPHA)
+            tint = pg.Surface((bw, bh), pg.SRCALPHA)
             tint.fill(pal.WEATHER_TINT[weather])
             surf.blit(tint, (0, 0))
         if weather == "rain":
-            self._draw_rain(surf, speed=420)
+            self._draw_rain(surf, speed=560)
         elif weather == "storm":
-            self._draw_rain(surf, speed=720)
+            self._draw_rain(surf, speed=900)
             self._maybe_flash(surf)
         elif weather == "snow":
             self._draw_snow(surf)
 
-        # time-of-day overlay (after weather so dusk darkens everything)
         tod = pal.time_of_day_tint(self.sim.hero.ap_left, self.sim.ap_per_day)
         if tod is not None:
-            ov = pg.Surface((VIEW_W, MAP_H), pg.SRCALPHA)
+            ov = pg.Surface((bw, bh), pg.SRCALPHA)
             ov.fill(tod)
             surf.blit(ov, (0, 0))
 
-        # day-change fade
         if self.fade > 0.001:
-            fade = pg.Surface((VIEW_W, VIEW_H), pg.SRCALPHA)
+            fade = pg.Surface((bw, bh), pg.SRCALPHA)
             fade.fill((0, 0, 0, int(255 * min(1.0, self.fade))))
             surf.blit(fade, (0, 0))
 
     def _draw_rain(self, surf, speed: float) -> None:
         pg = self.pg
+        sc = self.lay.sprite_scale
+        dx = max(1, int(round(2 * sc)))
+        dy = max(4, int(round(8 * sc)))
+        wdt = max(1, int(round(sc)))
         for p in self.particles.rain:
             x, y = int(p[0]), int(p[1])
-            pg.draw.line(surf, pal.RAIN_COLOR, (x, y), (x + 1, y + 4), 1)
+            pg.draw.line(surf, pal.RAIN_COLOR, (x, y), (x + dx, y + dy), wdt)
 
     def _draw_snow(self, surf) -> None:
+        pg = self.pg
+        _, bh = self._band_size()
+        r = max(1, int(round(2 * self.lay.sprite_scale)))
         for p in self.particles.snow:
             x, y = int(p[0]), int(p[1])
-            if 0 <= y < MAP_H:
-                surf.set_at((x % VIEW_W, y), pal.SNOW_COLOR)
+            if 0 <= y < bh:
+                pg.draw.circle(surf, pal.SNOW_COLOR, (x, y), r)
 
     def _maybe_flash(self, surf) -> None:
         if self.particles.flash_timer > 0:
-            flash = self.pg.Surface((VIEW_W, MAP_H), self.pg.SRCALPHA)
+            bw, bh = self._band_size()
+            flash = self.pg.Surface((bw, bh), self.pg.SRCALPHA)
             flash.fill(pal.STORM_FLASH)
             surf.blit(flash, (0, 0))
 
-    # -- bubbles / overlays --------------------------------------------------
+    # -- bubbles / overlays (Layer 2) ----------------------------------------
     def _update_bubble(self, now: float) -> None:
         lines = self.sim.hero.spoken_lines
         if len(lines) > self._spoken_index:
@@ -897,55 +1078,54 @@ class PixelApp:
             self._bubble_text = lines[-1]
             self._bubble_until = now + 3.5
 
-    def _draw_bubbles(self, surf) -> None:
+    def _draw_bubbles(self, window) -> None:
         if self.sim.done:
             return
-        anchor = self._hero_screen_anchor()
+        anchor = self._hero_win_anchor()
         now = self.anim_t
         if self.llm_enabled and self._thread_busy:
-            self.hud.draw_thought(surf, anchor)
+            self.hud.draw_thought(window, anchor, self.lay)
         if self._bubble_text and now < self._bubble_until:
-            self.hud.draw_speech(surf, self._bubble_text, anchor)
+            self.hud.draw_speech(window, self._bubble_text, anchor, self.lay)
 
-    def _draw_overlay(self, surf) -> None:
-        # The result panel owns the screen once the sim is over.
+    def _draw_overlay(self, window) -> None:
+        lay = self.lay
         if self.sim.done:
             hover = self._result_hover()
-            self._hits["result"] = self.overlays.draw_result(surf, self.sim, hover)
+            self._hits["result"] = self.overlays.draw_result(window, self.sim, lay, hover)
             return
-        # modal overlays (each stores its hit-list for the click handler)
         if self.overlay == "help":
-            self.overlays.draw_help(surf)
+            self.overlays.draw_help(window, lay)
         elif self.overlay == "diary":
-            self.overlays.draw_diary(surf, self.sim, self.diary_scroll)
+            self.overlays.draw_diary(window, self.sim, self.diary_scroll, lay)
         elif self.overlay == "craft":
             self._hits["rows"] = self.overlays.draw_craft(
-                surf, self.sim, self.craft_sel, getattr(self, "_overlay_hover", -1)
+                window, self.sim, self.craft_sel, lay, getattr(self, "_overlay_hover", -1)
             )
         elif self.overlay == "eat":
             self._hits["rows"] = self.overlays.draw_eat(
-                surf, self.sim, getattr(self, "_overlay_hover", -1)
+                window, self.sim, lay, getattr(self, "_overlay_hover", -1)
             )
         elif self.overlay == "heaven":
             send_hover = self._heaven_send_hover()
             self._hits["heaven_send"] = self.overlays.draw_heaven(
-                surf, self.heaven_text, send_hover
+                window, self.heaven_text, lay, send_hover
             )
         elif self.popup is not None:
-            self._draw_popup(surf)
+            self._draw_popup(window)
 
-    def _draw_popup(self, surf) -> None:
+    def _draw_popup(self, window) -> None:
         rects = self.overlays.draw_popup(
-            surf, self.popup["header"], self.popup["items"],
-            self.popup["anchor"], self.popup.get("hover", -1),
+            window, self.popup["header"], self.popup["items"],
+            self.popup["anchor"], self.lay, self.popup.get("hover", -1),
         )
         self.popup["rects"] = rects
 
     def _result_hover(self) -> str:
         rects = self._hits.get("result") or {}
-        ix, iy = self.mouse_pos
+        wx, wy = self.mouse_win
         for key, r in rects.items():
-            if r.collidepoint(ix, iy):
+            if r.collidepoint(wx, wy):
                 return key
         return ""
 
@@ -953,13 +1133,12 @@ class PixelApp:
         send = self._hits.get("heaven_send")
         if send is None:
             return False
-        return send.collidepoint(*self.mouse_pos)
+        return send.collidepoint(*self.mouse_win)
 
     # -- update --------------------------------------------------------------
     def _update(self, dt: float, now: float) -> None:
         self.anim_t += dt
         world = self.sim.world
-        # particles
         if world.weather in {"rain"}:
             self.particles.update_rain(dt, 1.0)
         elif world.weather == "storm":
@@ -970,19 +1149,16 @@ class PixelApp:
         elif world.weather == "snow":
             self.particles.update_snow(dt)
 
-        # day-change fade trigger
         if world.day != self._last_day:
             self.fade = 1.0
             self._last_day = world.day
         if self.fade > 0:
-            self.fade = max(0.0, self.fade - dt / 0.3)  # ~0.6s round trip handled by step()
+            self.fade = max(0.0, self.fade - dt / 0.3)
 
         self._update_bubble(now)
 
         if self.sim.done:
             return
-        # auto-walk runs in manual mode even with the guide showing, but pauses
-        # while a menu/overlay is open.
         if self.manual and self.walk_target is not None and self.overlay is None:
             self._walk_step(now)
         if self.overlay in {"craft", "diary", "help", "heaven", "eat"}:
@@ -994,9 +1170,8 @@ class PixelApp:
     def run_window(self) -> int:
         pg = self.pg
         pg.init()
-        pg.display.set_caption("SPL — Island Diorama")
-        window = pg.display.set_mode((WIN_W, WIN_H))
-        internal = pg.Surface((VIEW_W, VIEW_H))
+        pg.display.set_caption("SPL — Island Diorama (voxel)")
+        window = pg.display.set_mode((self.lay.win_w, self.lay.win_h), pg.RESIZABLE)
         clock = pg.time.Clock()
         deadline = time.time() + float(getattr(self.args, "_smoke_seconds", 0) or 0)
         smoke = getattr(self.args, "_smoke_seconds", 0)
@@ -1007,6 +1182,9 @@ class PixelApp:
             for event in pg.event.get():
                 if event.type == pg.QUIT:
                     self.running = False
+                elif event.type == pg.VIDEORESIZE:
+                    self._resize(event.w, event.h)
+                    window = pg.display.set_mode((self.lay.win_w, self.lay.win_h), pg.RESIZABLE)
                 elif event.type == pg.KEYDOWN:
                     self._last_unicode = getattr(event, "unicode", "")
                     self._handle_key(event.key)
@@ -1016,11 +1194,9 @@ class PixelApp:
                     if event.button == 1:
                         self._handle_click(*event.pos)
                     elif event.button in (4, 5) and self.overlay == "diary":
-                        # mouse-wheel scroll the diary
                         self.diary_scroll = max(0, self.diary_scroll + (1 if event.button == 5 else -1))
             self._update(dt, now)
-            self.render(internal)
-            pg.transform.scale(internal, (WIN_W, WIN_H), window)
+            self.render(window)
             pg.display.flip()
             if smoke and time.time() >= deadline:
                 self.running = False
@@ -1031,17 +1207,13 @@ class PixelApp:
     def run_shots(self, n: int, out_dir: str) -> int:
         pg = self.pg
         pg.init()
-        internal = pg.Surface((VIEW_W, VIEW_H))
-        window = pg.Surface((WIN_W, WIN_H))
+        window = pg.Surface((self.lay.win_w, self.lay.win_h))
         os.makedirs(out_dir, exist_ok=True)
         saved = 0
         guard = 0
-        # step the local brain every frame-batch; save the scaled frame after
-        # each sim action.
         while saved < n and guard < n * 80:
             guard += 1
-            self.anim_t += 1 / 30.0  # advance animation so frames differ
-            # advance weather particles a little for variety in shots
+            self.anim_t += 1 / 30.0
             w = self.sim.world.weather
             if w == "rain":
                 self.particles.update_rain(1 / 12.0, 1.0)
@@ -1057,8 +1229,7 @@ class PixelApp:
                 action = self.local_agent.choose(self.sim)
                 self.sim.step(action, confuse_on_invalid=False)
                 self._update_bubble(self.anim_t)
-            self.render(internal)
-            pg.transform.scale(internal, (WIN_W, WIN_H), window)
+            self.render(window)
             path = os.path.join(out_dir, f"shot_{saved:03d}.png")
             pg.image.save(window, path)
             saved += 1
@@ -1068,36 +1239,28 @@ class PixelApp:
         print(f"Saved {saved} screenshot(s) to {out_dir}")
         return 0
 
-
     # -- headless UI-state screenshots (debug: --shots-ui) -------------------
     def run_shots_ui(self, out_dir: str) -> int:
-        """Capture the 7 stage-2 UI states headlessly by driving the same
-        handler/draw code real input would. Each frame is rendered to the
-        internal surface, scaled, and saved."""
+        """Capture the UI states headlessly by driving the same handler/draw
+        code real input would. Each frame is composited to the window surface
+        and saved (so the PNGs are the real two-layer result)."""
         pg = self.pg
         pg.init()
-        internal = pg.Surface((VIEW_W, VIEW_H))
-        window = pg.Surface((WIN_W, WIN_H))
+        window = pg.Surface((self.lay.win_w, self.lay.win_h))
         os.makedirs(out_dir, exist_ok=True)
 
-        # Fast-forward a dozen days so the hero has tools, food and crops — the
-        # popups/HUD then show realistic content.
         self.manual = True
         self._fast_forward(14)
-        # guarantee some edible items + seeds for the eat/plant popups, and a
-        # little wood/stone/fiber so at least one craft recipe is affordable
-        # (so the craft shot can show a hover-highlighted, buildable row).
         self.sim.hero.add_item("bread", 2)
         self.sim.hero.add_item("berries", 3)
         self.sim.hero.add_item("turnip_seed", 3)
         self.sim.hero.add_item("wood", 4)
         self.sim.hero.add_item("stone", 3)
         self.sim.hero.add_item("fiber", 3)
-        self.anim_t = 20.0  # past the 10s hero-locator window for clean shots
+        self.anim_t = 20.0  # past the 10s hero-locator window
 
         def save(name: str) -> None:
-            self.render(internal)
-            pg.transform.scale(internal, (WIN_W, WIN_H), window)
+            self.render(window)
             pg.image.save(window, os.path.join(out_dir, name))
 
         world = self.sim.world
@@ -1109,12 +1272,12 @@ class PixelApp:
                 lambda p: world.tile_at(p) == kind and world.in_bounds(p),
             )
 
-        def tile_center_px(p) -> tuple[int, int]:
-            cx, cy = iso.tile_center(p.x, p.y, self.offset_x, self.offset_y)
+        def tile_center_win(p) -> tuple[int, int]:
+            cx, cy = iso.tile_center(p.x, p.y, self.offset_x, self.offset_y,
+                                     self.lay.sprite_scale)
             return cx, cy
 
-        # (f) clean manual-idle guide strip + (a-setup) — start here so the
-        # guide shot has no popup. Hover a tile right next to the hero.
+        # (f) clean manual-idle guide strip. Hover a tile next to the hero.
         near = None
         for _, npos in world.neighbors(hero.pos):
             near = npos
@@ -1122,11 +1285,11 @@ class PixelApp:
         if near is None:
             near = hero.pos
         self.hover_tile = near
-        self.mouse_pos = tile_center_px(near)
+        self.mouse_win = tile_center_win(near)
+        self.mouse_map = tile_center_win(near)
         save("ui_f_guide.png")
 
-        # (a) hover highlight + tooltip on a tile near the hero (prefer a crop
-        # or a named tile that yields a tooltip with distance).
+        # (a) hover highlight + tooltip on a tile near the hero.
         target = None
         for kind in ("field", "forest", "water"):
             t = find(kind)
@@ -1136,12 +1299,11 @@ class PixelApp:
         if target is None:
             target = near
         self.hover_tile = target
-        self.mouse_pos = tile_center_px(target)
+        self.mouse_win = tile_center_win(target)
+        self.mouse_map = tile_center_win(target)
         save("ui_a_hover.png")
 
-        # (b) click popup OPEN with several rows. Put the hero onto a grass tile
-        # that is adjacent to forest AND near water so move/till/chop/forage/
-        # fish all appear. Fall back to the hero's own home tile.
+        # (b) click popup OPEN with several rows.
         rich = world.find_nearest(
             hero.pos,
             lambda p: world.tile_at(p) in {"grass", "beach"}
@@ -1149,9 +1311,7 @@ class PixelApp:
         )
         if rich is not None:
             hero.pos = rich
-        popup_tile = hero.pos  # the hero's own tile -> the most actions
-        # if a forest sits next to the hero, click the forest tile so chop/forage
-        # show with a header naming the forest.
+        popup_tile = hero.pos
         forest_adj = None
         for _, npos in world.neighbors(hero.pos):
             if world.tile_at(npos) == "forest":
@@ -1159,8 +1319,7 @@ class PixelApp:
                 break
         click_tile = forest_adj or popup_tile
         self.hover_tile = None
-        self._open_tile_popup(click_tile, tile_center_px(click_tile))
-        # hover the second row for the highlight
+        self._open_tile_popup(click_tile, tile_center_win(click_tile))
         if self.popup and len(self.popup["items"]) > 1:
             self.popup["hover"] = 1
         save("ui_b_popup.png")
@@ -1172,7 +1331,7 @@ class PixelApp:
         save("ui_c_eat.png")
         self.overlay = None
 
-        # (d) craft overlay with a row hovered (pick first affordable row)
+        # (d) craft overlay with an affordable row hovered
         self.overlay = "craft"
         rows = self.overlays.craft_rows(self.sim)
         hov = next((i for i, (_, aff) in enumerate(rows) if aff), 0)
@@ -1186,9 +1345,9 @@ class PixelApp:
         save("ui_e_buttons.png")
         self.button_hover = None
 
-        # (extra, for self-review) watch-mode info-only popup + auto-walk marker
+        # (extra) watch-mode info-only popup + auto-walk marker
         self.manual = False
-        self._open_tile_popup(click_tile, tile_center_px(click_tile))
+        self._open_tile_popup(click_tile, tile_center_win(click_tile))
         save("ui_x_watch_popup.png")
         self.popup = None
         self.manual = True
@@ -1207,16 +1366,15 @@ class PixelApp:
         self.sim.completed = True
         self.sim.result_reason = self.fonts.jp("無事に冬を越えた。", "Survived the winter.")
         self._hits["result"] = {}
-        self.mouse_pos = (0, 0)
-        # render once to lay out the rects, then hover [もう一度]
-        self.render(internal)
+        self.mouse_win = (0, 0)
+        self.render(window)
         again = self._hits.get("result", {}).get("again")
         if again is not None:
-            self.mouse_pos = again.center
+            self.mouse_win = again.center
         save("ui_g_result.png")
 
         pg.quit()
-        print(f"Saved the stage-2 UI screenshots (7 required states + extras) to {out_dir}")
+        print(f"Saved the UI screenshots (required states + extras) to {out_dir}")
         return 0
 
 
@@ -1228,7 +1386,6 @@ def run(args: object) -> int:
         app = PixelApp(args, headless=True)
         return app.run_shots_ui(getattr(args, "shot_dir", "/tmp/spl_px"))
     if shots > 0:
-        # Headless: set the dummy driver BEFORE pygame init.
         os.environ.setdefault("SDL_VIDEODRIVER", "dummy")
         app = PixelApp(args, headless=True)
         return app.run_shots(shots, getattr(args, "shot_dir", "/tmp/spl_px"))

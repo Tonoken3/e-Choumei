@@ -30,6 +30,9 @@ def build_parser() -> argparse.ArgumentParser:
     pixel.add_argument("--cassette", default="Qwen勇者", help="cassette name from config/models.toml")
     pixel.add_argument("--manual", action="store_true", help="control the hero manually")
     pixel.add_argument("--speed", type=int, default=2, choices=(1, 2, 3), help="watch speed: 1 slow / 2 normal / 3 fast")
+    pixel.add_argument("--scale", type=int, default=0, choices=(0, 1, 2, 3),
+                       help="window preset: 0=auto (Full HD if desktop allows, else 90%% of desktop), "
+                            "1=small 1280x720, 2=fhd 1920x1080, 3=large 2560x1440")
     pixel.add_argument("--start-day", type=int, default=0, help="debug: fast-forward (local brain) to this day before rendering")
     # hidden verification flags
     pixel.add_argument("--shots", type=int, default=0, help=argparse.SUPPRESS)
