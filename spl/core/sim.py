@@ -119,14 +119,16 @@ class Simulation:
                 self.end_day()
             if not self.hero.alive:
                 self.failed = True
-                self.result_reason = "The hero died."
+                if not self.result_reason:
+                    self.result_reason = "仙人は果てた。"
             return result
         self.log(result.message)
         if result.end_day or self.hero.ap_left <= 0:
             self.end_day()
         if not self.hero.alive:
             self.failed = True
-            self.result_reason = "The hero died."
+            if not self.result_reason:
+                self.result_reason = "仙人は果てた。"
         return result
 
     def confuse(self, reason: str) -> ActionResult:
@@ -162,12 +164,12 @@ class Simulation:
         self.hero.days_survived = self.world.day if self.hero.alive else max(0, self.world.day - 1)
         if not self.hero.alive:
             self.failed = True
-            self.result_reason = f"Fell on day {self.world.day}."
+            self.result_reason = f"{self.world.day}日目、仙人は果てた。"
             self.log(self.result_reason)
             return
         if self.world.day >= self.max_days:
             self.completed = True
-            self.result_reason = f"Survived {self.max_days} days."
+            self.result_reason = f"{self.max_days}日を生き抜いた。"
             self.log(self.result_reason)
             return
         self.world.day += 1
