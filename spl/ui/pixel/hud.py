@@ -259,7 +259,7 @@ class Hud:
         self.f = fonts
 
     # -- bottom stat HUD -----------------------------------------------------
-    def draw(self, surf, sim, score: int, lay: Layout) -> None:
+    def draw(self, surf, sim, score: int, lay: Layout, brain_status: str = "") -> None:
         pg = self.pg
         f = self.f
         hero = sim.hero
@@ -323,6 +323,12 @@ class Hud:
             f"{season} {world.day_in_season}  {weather}"
         )
         surf.blit(_render(f.body, day_line, pal.UI_GOLD), (rx, ry))
+        # 思考予算: tier + measured TPS, drawn to the right of the day line so the
+        # serving stack's "instinct depth" is visible while watching.
+        if brain_status:
+            day_w = f.body.size(day_line)[0]
+            surf.blit(_render(f.label, brain_status, pal.UI_TEXT_DIM),
+                      (rx + day_w + lay.px(12), ry + lay.px(1)))
         ry += f.body.get_height() + lay.px(3)
 
         inv = hero.inventory_summary(limit=6)

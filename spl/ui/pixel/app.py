@@ -262,7 +262,24 @@ class PixelApp:
             return None
         if not cassette.base_url:
             return None
+        # --tps overrides the cassette's forced TPS (思考予算). 0 = auto-measure.
+        tps = float(getattr(self.args, "tps", 0.0) or 0.0)
+        if tps > 0:
+            from dataclasses import replace
+
+            cassette = replace(cassette, tps=tps)
         return OpenAICompatibleBrain(cassette)
+
+    def _brain_status(self) -> str:
+        """思考予算 tier+TPS line for the HUD, read from the brain safely."""
+        if not self.llm_enabled or self.brain is None:
+            return ""
+        try:
+            if getattr(self.brain, "calls", 0) <= 0 and getattr(self.brain, "forced_tps", 0) <= 0:
+                return ""
+            return self.brain.status_line()
+        except Exception:  # noqa: BLE001
+            return ""
 
     def _fast_forward(self, target_day: int) -> None:
         agent = LocalPolicyAgent()
@@ -808,7 +825,7 @@ class PixelApp:
 
         # -- Layer 2: crisp UI ----------------------------------------------
         self._refresh_buttons()
-        self.hud.draw(window, self.sim, self.sim.score(), lay)
+        self.hud.draw(window, self.sim, self.sim.score(), lay, brain_status=self._brain_status())
         self.overlays.draw_button_bar(window, self.buttons, self.button_hover, lay)
         self._draw_window_cursor(window)
         self._draw_guide(window)

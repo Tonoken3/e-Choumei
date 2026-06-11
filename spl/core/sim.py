@@ -86,6 +86,11 @@ class Simulation:
         return self.completed or self.failed or not self.hero.alive
 
     def step(self, request: GameAction, confuse_on_invalid: bool = False) -> ActionResult:
+        # confuse_on_invalid is kept for API compatibility (callers still pass it),
+        # but a VALID action word the world rejects is no longer routed to
+        # confuse(): it "fumbles" instead — reality simply refuses, time passes,
+        # one AP is lost, no sanity hit. 混乱 stays only for unknown action words
+        # and the sanity<=7 collapse (思考予算 / scoring honesty).
         if self.done:
             return ActionResult(False, "Simulation is already finished.")
         # An action word the world does not recognise can never become reality.
@@ -96,10 +101,20 @@ class Simulation:
         if self.hero.sanity <= 7 and self.rng.chance(0.20):
             return self.confuse("Sanity collapsed into static.")
         result = self.engine.perform(self, request)
-        if not result.ok and confuse_on_invalid:
-            # confuse() fully resolves the turn (safe action + its own end_day),
-            # so return immediately: never let step() run end_day() a second time.
-            return self.confuse(result.message)
+        if not result.ok:
+            # Fumble: a known action word that the world refused (wrong tile, not
+            # adjacent, missing materials/seed, already planted, no AP...). The
+            # hero loses one AP — reality refuses and time still passes — but
+            # keeps their wits (no 混乱, no sanity loss). Faster rigs that "think"
+            # more avoid these world-rejects; that is the 思考予算 race.
+            self.hero.ap_left = max(0, self.hero.ap_left - 1)
+            self.log(result.message + " [fumble -1AP]")
+            if self.hero.ap_left <= 0:
+                self.end_day()
+            if not self.hero.alive:
+                self.failed = True
+                self.result_reason = "The hero died."
+            return result
         self.log(result.message)
         if result.end_day or self.hero.ap_left <= 0:
             self.end_day()

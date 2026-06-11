@@ -12,6 +12,7 @@ class ArenaResult:
     confusions: int
     reason: str
     best_line: str = ""
+    tier: str = ""  # 思考予算 tier the LLM brain ran at (empty for local)
 
 
 def select_meigen(lines: list[str], n: int = 5) -> list[str]:
@@ -51,11 +52,14 @@ def fallback_motto(sim: object) -> dict[str, object]:
 
 def render_leaderboard(results: list[ArenaResult]) -> str:
     ordered = sorted(results, reverse=True)
-    header = f"{'Cassette':20} {'Seed':>5} {'Days':>5} {'Score':>6} {'Conf':>5}  {'Result':24} 銘言"
-    lines = [header, "-" * 96]
+    header = (
+        f"{'Cassette':20} {'Seed':>5} {'Days':>5} {'Score':>6} {'Conf':>5} "
+        f"{'Tier':>6}  {'Result':24} 銘言"
+    )
+    lines = [header, "-" * 104]
     for row in ordered:
         lines.append(
             f"{row.cassette[:20]:20} {row.seed:5d} {row.survived:5d} {row.score:6d} "
-            f"{row.confusions:5d}  {row.reason[:24]:24} {row.best_line}"
+            f"{row.confusions:5d} {(row.tier or '-'):>6}  {row.reason[:24]:24} {row.best_line}"
         )
     return "\n".join(lines)

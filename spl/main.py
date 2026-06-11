@@ -28,6 +28,12 @@ def build_parser() -> argparse.ArgumentParser:
     pixel.add_argument("--days", type=int, default=112)
     pixel.add_argument("--llm", action="store_true", help="let an OpenAI-compatible cassette play")
     pixel.add_argument("--cassette", default="Qwen仙人", help="cassette name from config/models.toml")
+    pixel.add_argument(
+        "--tps",
+        type=float,
+        default=0.0,
+        help="思考予算: force a constant tokens/sec (0=auto-measure)",
+    )
     pixel.add_argument("--manual", action="store_true", help="control the hero manually")
     pixel.add_argument("--speed", type=int, default=2, choices=(1, 2, 3), help="watch speed: 1 slow / 2 normal / 3 fast")
     pixel.add_argument("--scale", type=int, default=0, choices=(0, 1, 2, 3),
@@ -60,6 +66,13 @@ def _add_common(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--days", type=int, default=112)
     parser.add_argument("--llm", action="store_true", help="use OpenAI-compatible cassette when possible")
     parser.add_argument("--cassette", default="Qwen仙人", help="cassette name from config/models.toml")
+    parser.add_argument(
+        "--tps",
+        type=float,
+        default=0.0,
+        help="思考予算: force a constant tokens/sec (0=auto-measure). "
+        "e.g. --tps 10 (雲水) or --tps 1000 (仙界)",
+    )
 
 
 def run_pixel(args: object) -> int:

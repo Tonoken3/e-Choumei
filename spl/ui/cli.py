@@ -43,7 +43,7 @@ def run_play(args: object) -> int:
         turns += 1
         if not args.no_clear:
             _clear()
-        print_frame(sim, observer, radius=args.radius)
+        print_frame(sim, observer, radius=args.radius, brain=brain if args.llm else None)
         if args.manual:
             line = input("\nSPL> ").strip()
             special = line.lower()
@@ -83,7 +83,8 @@ def run_play(args: object) -> int:
         sim.result_reason = "Stopped by max turn guard."
     if not args.no_clear:
         _clear()
-    print_result(sim, motto=_final_motto(sim, brain if args.llm else None))
+    print_result(sim, motto=_final_motto(sim, brain if args.llm else None),
+                 brain=brain if args.llm else None)
     return 0 if sim.completed else 1
 
 
@@ -117,7 +118,8 @@ def run_simulate(args: object) -> int:
         turns += 1
     if turns >= max_turns and not sim.done:
         sim.result_reason = "Stopped by max turn guard."
-    print_result(sim, motto=_final_motto(sim, brain if args.llm else None))
+    print_result(sim, motto=_final_motto(sim, brain if args.llm else None),
+                 brain=brain if args.llm else None)
     print(f"Turns: {turns}")
     if turns >= max_turns and not sim.done:
         print("Stopped by max turn guard.")
@@ -140,7 +142,18 @@ def _make_brain(args: object) -> object | None:
     cassette = find_cassette(PROJECT_ROOT / "config" / "models.toml", getattr(args, "cassette", None))
     if not cassette.base_url:
         return None
+    cassette = _apply_tps_override(cassette, args)
     return OpenAICompatibleBrain(cassette)
+
+
+def _apply_tps_override(cassette: object, args: object) -> object:
+    """--tps overrides the cassette's forced TPS (思考予算). 0 = auto-measure."""
+    from dataclasses import replace
+
+    tps = float(getattr(args, "tps", 0.0) or 0.0)
+    if tps > 0:
+        return replace(cassette, tps=tps)
+    return cassette
 
 
 def parse_manual_command(line: str) -> GameAction:
@@ -190,12 +203,17 @@ def parse_manual_command(line: str) -> GameAction:
     raise ValueError(f"unknown action: {action}")
 
 
-def print_frame(sim: Simulation, observer: ObservationBuilder, radius: int | None = 7) -> None:
+def print_frame(sim: Simulation, observer: ObservationBuilder, radius: int | None = 7,
+                brain: object | None = None) -> None:
     hero = sim.hero
     print("SPL 『自給自足仙人 e:鴨長明』")
     print("=" * 72)
     print(sim.status_line())
     print(f"Score {sim.score()} | Confusion {hero.confusion_count} | Seed {sim.seed}")
+    # 思考予算: show the serving stack's current tier + measured TPS.
+    line = _brain_status(brain)
+    if line:
+        print(f"思考予算: {line}")
     print()
     print(sim.world.render_map(hero.pos, radius=radius))
     print()
@@ -218,6 +236,18 @@ def print_frame(sim: Simulation, observer: ObservationBuilder, radius: int | Non
         print("  " + line)
 
 
+def _brain_status(brain: object | None) -> str:
+    """The brain's 思考予算 status line, or '' for a non-LLM run / before any call."""
+    if brain is None or not hasattr(brain, "status_line"):
+        return ""
+    try:
+        if getattr(brain, "calls", 0) <= 0 and getattr(brain, "forced_tps", 0) <= 0:
+            return ""
+        return brain.status_line()
+    except Exception:  # noqa: BLE001
+        return ""
+
+
 def print_diary(sim: Simulation) -> None:
     print("\nDiary")
     print("=" * 72)
@@ -229,7 +259,8 @@ def print_diary(sim: Simulation) -> None:
         print("-" * 40)
 
 
-def print_result(sim: Simulation, motto: dict[str, object] | None = None) -> None:
+def print_result(sim: Simulation, motto: dict[str, object] | None = None,
+                 brain: object | None = None) -> None:
     print("SPL Result")
     print("=" * 72)
     motto = motto or fallback_motto(sim)
@@ -242,6 +273,13 @@ def print_result(sim: Simulation, motto: dict[str, object] | None = None) -> Non
     print(f"Score: {sim.score()}")
     print(f"Days survived: {sim.hero.days_survived}")
     print(f"Confusions: {sim.hero.confusion_count}")
+    # 思考予算 summary when an LLM brain played.
+    if brain is not None and getattr(brain, "calls", 0) > 0:
+        tier = brain.current_tier()
+        print(
+            f"思考予算: {tier.name} (avg {brain.avg_tps():.0f} t/s, "
+            f"verify-corrections {brain.verify_corrections})"
+        )
     print(f"Civilization points: {sim.hero.civilization_points()}")
     print()
     print("Inventory:")

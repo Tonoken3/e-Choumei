@@ -29,6 +29,25 @@ Use only what the supplied log and stats show. Invent no events, items, or numbe
 Keep it under 240 characters. Never use code fences.
 """
 
+VERIFY_PROMPT = """You are the hermit's second thought — a quick sanity check before acting.
+You are given the same observation again and one or more proposed actions.
+Decide: will the chosen action actually SUCCEED under the world's rules, or would
+the simulation reject it? Common world-rejects to catch:
+- planting before tilling, or planting on a tile that is already planted;
+- "harvest"/"water" where there is no crop, or harvesting a crop that is not ready;
+- "chop" with no forest nearby, "mine" with no rock nearby, "fish"/"drink" with no water/well nearby;
+- "move" toward a target that is not adjacent or has no path;
+- "craft"/"build" without the materials or the required station, or for something already owned;
+- "eat"/"cook"/"store" on an item the hermit does not hold;
+- any action that needs more action points (ap_left) than remain.
+If a proposal would be rejected, return a CORRECTED action that will succeed now.
+If several proposals are given, pick the best VALID one. If the action is already
+fine, return it unchanged.
+Return exactly one JSON object with the SAME keys: {"think":"...","action":"...","args":{...},"say":"..."}.
+"say" must stay IN JAPANESE (文豪風); never English. Use only a listed action.
+Never use code fences. Never output anything except JSON.
+"""
+
 MOTTO_PROMPT = """The hermit's year on the island has ended. You are given the full journey:
 how it ended, days survived, score, the diary trail, "chronicle" (the dated record of
 what actually happened), and — most importantly — "best_lines": the five best 銘言

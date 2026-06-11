@@ -89,6 +89,130 @@ class SplSchemaTests(unittest.TestCase):
         self.assertEqual(parsed.args["item"], "berries")
 
 
+class ThinkingBudgetTests(unittest.TestCase):
+    """思考予算: inference speed → tier → survival depth (no LLM needed)."""
+
+    def test_tier_for_tps_boundaries(self) -> None:
+        from spl.agent.llm_client import tier_for_tps
+
+        cases = {
+            0.0: "雲水",
+            29.9: "雲水",
+            30.0: "行者",
+            99.9: "行者",
+            100.0: "羅漢",
+            299.9: "羅漢",
+            300.0: "仙界",
+            5000.0: "仙界",
+        }
+        for tps, name in cases.items():
+            self.assertEqual(tier_for_tps(tps).name, name, f"tps={tps}")
+
+    def test_tier_budgets_escalate_with_speed(self) -> None:
+        from spl.agent.llm_client import tier_for_tps
+
+        cloud = tier_for_tps(10)     # 雲水
+        sage = tier_for_tps(50)      # 行者
+        arhat = tier_for_tps(150)    # 羅漢
+        immortal = tier_for_tps(400)  # 仙界
+        # token budgets grow monotonically with speed
+        self.assertLess(cloud.max_tokens, sage.max_tokens)
+        self.assertLess(sage.max_tokens, arhat.max_tokens)
+        self.assertLess(arhat.max_tokens, immortal.max_tokens)
+        # 雲水: no repair, no verify, single candidate
+        self.assertFalse(cloud.repair)
+        self.assertFalse(cloud.verify)
+        self.assertEqual(cloud.candidates, 1)
+        # verify only from 羅漢 up; only 仙界 proposes twice
+        self.assertFalse(sage.verify)
+        self.assertTrue(arhat.verify)
+        self.assertTrue(immortal.verify)
+        self.assertEqual(immortal.candidates, 2)
+
+    def test_default_tps_before_samples_is_gyoja(self) -> None:
+        from spl.agent.llm_client import Cassette, OpenAICompatibleBrain
+
+        brain = OpenAICompatibleBrain(Cassette(name="x", base_url="http://localhost:1/v1"))
+        # No samples yet: assume 80 TPS -> 行者.
+        self.assertEqual(brain.avg_tps(), 80.0)
+        self.assertEqual(brain.current_tier().name, "行者")
+
+    def test_rolling_tps_average_over_window(self) -> None:
+        from spl.agent.llm_client import Cassette, OpenAICompatibleBrain
+
+        brain = OpenAICompatibleBrain(Cassette(name="x", base_url="http://localhost:1/v1"))
+        # 100 tokens in 0.5s -> 200 TPS; two samples average to 200 -> 羅漢.
+        brain._record_tps(100, 0.5)
+        brain._record_tps(120, 0.6)  # also 200 TPS
+        self.assertAlmostEqual(brain.avg_tps(), 200.0, places=3)
+        self.assertEqual(brain.current_tier().name, "羅漢")
+        # The window only keeps the last 8 samples.
+        for _ in range(20):
+            brain._record_tps(10, 1.0)  # 10 TPS each
+        self.assertEqual(len(brain._tps_samples), brain._TPS_WINDOW)
+        self.assertAlmostEqual(brain.avg_tps(), 10.0, places=3)
+        self.assertEqual(brain.current_tier().name, "雲水")
+
+    def test_forced_tps_overrides_measurement(self) -> None:
+        from spl.agent.llm_client import Cassette, OpenAICompatibleBrain
+
+        brain = OpenAICompatibleBrain(
+            Cassette(name="x", base_url="http://localhost:1/v1", tps=1000.0)
+        )
+        # Even a slow measurement cannot pull the forced tier down.
+        brain._record_tps(10, 1.0)
+        self.assertEqual(brain.avg_tps(), 1000.0)
+        self.assertEqual(brain.current_tier().name, "仙界")
+        # status_line surfaces the tier + TPS + correction count.
+        self.assertIn("仙界", brain.status_line())
+        self.assertIn("1000", brain.status_line())
+
+    def test_completion_token_fallback_when_usage_missing(self) -> None:
+        from spl.agent.llm_client import Cassette, OpenAICompatibleBrain
+
+        brain = OpenAICompatibleBrain(Cassette(name="x", base_url="http://localhost:1/v1"))
+        # usage missing -> _record_tps is only fed by _chat's len//3 fallback;
+        # here we feed it directly to confirm a sane sample is recorded.
+        brain._record_tps(0, 0.5)  # zero tokens -> ignored
+        self.assertEqual(len(brain._tps_samples), 0)
+        brain._record_tps(60, 0.3)  # 200 TPS
+        self.assertEqual(len(brain._tps_samples), 1)
+
+
+class FumbleRuleTests(unittest.TestCase):
+    """A valid action word the WORLD rejects fumbles (-1AP), never 混乱."""
+
+    def test_valid_but_failing_action_fumbles_without_confusion(self) -> None:
+        # At seed 42's start tile there is no rock nearby, so "mine" is a valid
+        # action word that the world rejects -> a fumble, not confusion.
+        sim = Simulation(seed=42, max_days=10)
+        ap_before = sim.hero.ap_left
+        sanity_before = sim.hero.sanity
+        result = sim.step(GameAction(action="mine"), confuse_on_invalid=True)
+        self.assertFalse(result.ok)
+        self.assertEqual(sim.hero.ap_left, ap_before - 1)        # lost exactly 1 AP
+        self.assertEqual(sim.hero.confusion_count, 0)            # no 混乱
+        self.assertEqual(sim.hero.sanity, sanity_before)        # no sanity loss
+        self.assertIn("[fumble -1AP]", sim.full_log[-1])
+
+    def test_fumble_at_last_ap_ends_the_day(self) -> None:
+        sim = Simulation(seed=42, max_days=10)
+        sim.hero.ap_left = 1
+        sim.hero.stamina = 50
+        day_before = sim.world.day
+        sim.step(GameAction(action="mine"), confuse_on_invalid=True)
+        self.assertEqual(sim.hero.ap_left, sim.ap_per_day)       # day rolled over
+        self.assertEqual(sim.world.day, day_before + 1)
+        self.assertEqual(sim.hero.confusion_count, 0)
+
+    def test_unknown_action_still_confuses(self) -> None:
+        # The fumble rule must NOT swallow unknown words: those still confuse.
+        sim = Simulation(seed=42, max_days=3)
+        result = sim.step(GameAction(action="summon_dragon"))
+        self.assertTrue(result.ok)
+        self.assertEqual(sim.hero.confusion_count, 1)
+
+
 try:  # the pixel/voxel frontend needs pygame; skip its tests if it is absent
     import os as _os
 

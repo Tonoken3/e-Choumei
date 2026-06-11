@@ -35,6 +35,13 @@ def _run_one(
     if not sim.done:
         sim.result_reason = "Stopped by turn guard."
     best = select_meigen(sim.hero.spoken_lines, 1)
+    # 思考予算: record the tier the LLM brain finished at (empty for local).
+    tier = ""
+    if use_llm and brain is not None and getattr(brain, "calls", 0) > 0:
+        try:
+            tier = brain.current_tier().name
+        except Exception:  # noqa: BLE001
+            tier = ""
     return ArenaResult(
         score=sim.score(),
         cassette=cassette_name,
@@ -43,6 +50,7 @@ def _run_one(
         confusions=sim.hero.confusion_count,
         reason=sim.result_reason,
         best_line=best[0] if best else "",
+        tier=tier,
     )
 
 
