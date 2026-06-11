@@ -101,12 +101,16 @@ def run_evolve(
 
     brain: object | None = None
     if use_llm and cassette is not None:
-        # --cassette MAGI → 編纂評議会 (the council compiles the canon).
-        if getattr(cassette, "name", None) == "MAGI":
-            from spl.agent.magi import make_magi
+        # --cassette MAGI → 編纂評議会 (the council compiles the canon). MAGI →
+        # v2 pilot, MAGI-V1 → v1 committee (compile_canon is shared by both).
+        if getattr(cassette, "name", None) in ("MAGI", "MAGI-V1"):
+            from spl.agent.magi import magi_mode_for_cassette, make_magi
             from spl.core.sim import PROJECT_ROOT
 
-            brain = make_magi(PROJECT_ROOT / "config" / "models.toml")
+            brain = make_magi(
+                PROJECT_ROOT / "config" / "models.toml",
+                mode=magi_mode_for_cassette(getattr(cassette, "name", None)),
+            )
         elif getattr(cassette, "base_url", ""):
             brain = OpenAICompatibleBrain(cassette)
 

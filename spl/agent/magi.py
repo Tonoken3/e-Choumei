@@ -1,6 +1,34 @@
 from __future__ import annotations
 
-"""MAGI 合議制 — an Evangelion-style three-seat deliberation brain.
+"""MAGI — an Evangelion-style three-seat brain, in two modes.
+
+v2 「操縦」(pilot, default) — 評議と操縦の分離
+--------------------------------------------------
+A live v1 finding: committee-piloting THRASHES. Over 7 in-game days a v1 life
+ran 70 deliberations, reached 0 unanimous rulings, and fumbled 57 times —
+deliberation is excellent for REVIEW but ruinous for CONTROL. v2 splits the two:
+
+  * 朝の評定 (morning council): on the first turn of each in-game day the three
+    seats each give SHORT survival counsel (NOT a move — 操縦はGemwenが行う),
+    and one Gemma synthesis call merges them into その日の評定 (≤200 chars). A
+    crisis (water/hunger/hp falling through a floor) reconvenes the council once
+    more that day, replacing the 評定.
+  * 操縦 (piloting): every turn one pilot — the Gemwen relay — flies. Gemma
+    (:8102) reads the observation + the standing 評定 and thinks the next move's
+    aim in two sentences; Qwen (:8011) then emits the schema-forced action with
+    that think + the 評定 appended. Two calls per turn, one hand on the stick.
+
+The 評定 lives on the brain (the human watcher's 作戦 channel stays separate);
+it is injected into BOTH pilot calls all day so the council's counsel steers
+without re-litigating every move.
+
+v1 「委員会」(committee) — kept verbatim for comparison/A-B
+----------------------------------------------------------
+The original per-turn 3-seat deliberation below is unchanged and reachable via
+``mode="committee"`` (cassette name "MAGI-V1"). compile_canon — the 編纂評議会
+that kills the poison article — is shared by both modes untouched.
+
+Original committee docstring:
 
 The council fronts the SAME external interface as ``OpenAICompatibleBrain``
 (``choose`` / ``write_diary`` / ``write_motto`` / ``compile_canon`` /
@@ -50,6 +78,40 @@ MODERATOR_THINK_PROMPT = (
     "(3)生存に資するか の観点で、どれを採るべきか二、三文で裁定せよ。JSONは書かず、"
     "短い日本語の裁定だけを返せ。"
 )
+# ── v2 pilot-mode prompts ──────────────────────────────────────────────────
+# 朝の評定: each seat gives SHORT survival counsel for the day. The prompt MUST
+# state the role fact — they do NOT pilot; Gemwen flies. The persona lens is
+# appended per seat. (The marker substring below is asserted in tests/smoke.)
+COUNCIL_ROLE_FACT = "操縦はGemwenが行う。あなたの仕事は操縦ではなく、生存のための評議のみである。"
+_COUNCIL_LENSES = {
+    "melchior": "科学者(計画・資源計算)",
+    "balthasar": "母(食・水・火・体を最優先)",
+    "casper": "直感(見落としの指摘)",
+}
+
+
+def _council_seat_prompt(seat: str) -> str:
+    lens = _COUNCIL_LENSES.get(seat, seat)
+    return (
+        f"{COUNCIL_ROLE_FACT}"
+        f"{lens}として、次の一日への助言を簡潔に述べよ。"
+        "二〜三文、200字以内。JSONや行動名は書かず、その日の方針だけを日本語で返せ。"
+    )
+
+
+COUNCIL_SYNTHESIS_PROMPT = (
+    "あなたはMAGIの司会者。三機関(MELCHIOR=科学者/BALTHASAR=母/CASPER=直感)の"
+    "本日の助言が与えられる。操縦士Gemwenが一日それを携えて飛べるよう、三案を"
+    "200字以内の『その日の評定』一文〜数文にまとめよ。具体的な生存行動(いつ・何を)を"
+    "優先し、精神論で曇らせるな。JSONは書かず、評定本文だけを日本語で返せ。"
+)
+
+# 操縦: Gemma thinks the next move's aim in two sentences, given the obs + 評定.
+PILOT_THINK_PROMPT = (
+    "あなたは操縦士Gemwenの思考側。今日の評定を踏まえ、次の一手の狙いを二文で。"
+    "JSONや行動名は書かず、短い日本語の狙いだけを返せ。"
+)
+
 COMPILE_REVIEW_PROMPT = (
     "あなたはMAGIの第二機関BALTHASAR、母の人格。生存が全てに優先する。"
     "編纂者(MELCHIOR)が起草した家訓改定案を受け取る。条文ごとに『採用』か『棄却』かを、"
@@ -84,7 +146,10 @@ class MagiBrain:
         balthasar: OpenAICompatibleBrain | None,
         casper: OpenAICompatibleBrain | None = None,
         identity: Cassette | None = None,
+        mode: str = "pilot",
     ) -> None:
+        # mode: "pilot" (v2, default — 評議と操縦の分離) or "committee" (v1).
+        self.mode = "committee" if str(mode) == "committee" else "pilot"
         # MELCHIOR is the spine: diary/motto route through it, and it is the
         # degraded-mode fallback. It MUST exist.
         self.melchior = melchior
@@ -107,6 +172,15 @@ class MagiBrain:
         self.tier_history: list[str] = []
         self.turn_records: list[dict[str, Any]] = []
         self.degraded_warned = False
+
+        # -- v2 pilot-mode state ------------------------------------------
+        self.counsel: str = ""          # その日の評定 — injected into both pilot calls
+        self._counsel_day: int | None = None   # in-game day the 評定 was set for
+        self._crisis_today = False      # crisis re-council already ran today?
+        self.councils_held = 0          # number of 朝の評定 sessions
+        self.crisis_councils = 0        # number of crisis reconvenes
+        self.pilot_turns = 0            # turns flown by the pilot relay
+        self.last_pilot_think = ""      # most recent pilot think snippet (UI/smoke)
 
     # -- diarist seam: the runner calls set_diarist(brain) then injects book ---
     # ObservationBuilder carries book_lessons via attributes; the runner sets
@@ -136,15 +210,164 @@ class MagiBrain:
         return self._identity
 
     def status_line(self) -> str:
+        if self.mode == "pilot":
+            return (
+                f"MAGI操縦 評定{self.councils_held}"
+                f"(臨時{self.crisis_councils}) 手数{self.pilot_turns}"
+            )
         return (
             f"MAGI 合議{self.councils} 全会一致{self.unanimous} "
             f"司会裁定{self.moderator_used}"
         )
 
     # ====================================================================
-    # choose — the council per turn.
+    # choose — dispatch by mode.
     # ====================================================================
     def choose(self, sim: object) -> GameAction:
+        if self.mode == "pilot":
+            return self._choose_pilot(sim)
+        return self._choose_committee(sim)
+
+    # ====================================================================
+    # v2 pilot mode: 朝の評定 → Gemwen relay flies every turn.
+    # ====================================================================
+    def _choose_pilot(self, sim: object) -> GameAction:
+        self.calls += 1
+        budget = self.melchior.current_tier()
+        self.tier_history.append(budget.name)
+        obs = self.observer.build(sim)
+
+        # The council still needs the Gemma side (think + synthesis). If :8102 is
+        # down, the pilot degrades to Qwen-alone with whatever 評定 is standing.
+        gemma_up = self._gemma_alive()
+        if not gemma_up and not self.degraded_warned:
+            sim.log("MAGI: 操縦補佐(:8102)応答せず — Qwen単独操縦に縮退")
+            self.degraded_warned = True
+
+        # 1) Council session bookkeeping: convene on the first turn of a new day,
+        #    and reconvene once on a same-day crisis.
+        day = self._sim_day(sim)
+        if day != self._counsel_day:
+            self._counsel_day = day
+            self._crisis_today = False
+            self._convene_council(sim, obs, budget, crisis=False, gemma_up=gemma_up)
+        elif not self._crisis_today and self._is_crisis(sim):
+            self._crisis_today = True
+            self._convene_council(sim, obs, budget, crisis=True, gemma_up=gemma_up)
+
+        # 2) Pilot relay: Gemma thinks the aim, Qwen emits the action — both given
+        #    the standing 評定.
+        action = self._pilot_relay(obs, budget, gemma_up=gemma_up)
+        self.pilot_turns += 1
+        self.turn_records.append({
+            "mode": "pilot",
+            "day": day,
+            "counsel": self.counsel,
+            "think": self.last_pilot_think,
+            "final": self._fmt_vote(action),
+            "degraded": not gemma_up,
+        })
+        return action
+
+    # -- 朝の評定 / 臨時評定: each seat counsels, Gemma synthesizes その日の評定 --
+    def _convene_council(
+        self, sim: object, obs: dict, budget: ThinkingBudget, *,
+        crisis: bool, gemma_up: bool,
+    ) -> None:
+        import json
+
+        user = json.dumps(obs, ensure_ascii=False)
+        counsels: dict[str, str] = {}
+        # MELCHIOR (Qwen) and CASPER-lens (Qwen) think on :8011; BALTHASAR (Gemma)
+        # on :8102 when up. Each prompt states the role fact (操縦はGemwenが行う).
+        seat_brains = [
+            ("melchior", self.melchior),
+            ("balthasar", self.balthasar if gemma_up else self.melchior),
+            ("casper", self.melchior),
+        ]
+        for seat, brain in seat_brains:
+            brain = brain or self.melchior
+            try:
+                counsels[seat] = brain.think_freetext(
+                    _council_seat_prompt(seat), user, max_tokens=200
+                ).strip()
+            except Exception:  # noqa: BLE001
+                counsels[seat] = ""
+
+        # One synthesis call (Gemma when up, else Qwen) → その日の評定 ≤200 chars.
+        synth_brain = self.balthasar if (gemma_up and self.balthasar) else self.melchior
+        synth_user = json.dumps(
+            {"observation": obs, "councils": counsels}, ensure_ascii=False
+        )
+        try:
+            counsel = synth_brain.think_freetext(
+                COUNCIL_SYNTHESIS_PROMPT, synth_user, max_tokens=200
+            ).strip()
+        except Exception:  # noqa: BLE001
+            counsel = ""
+        if not counsel:
+            # Degraded synthesis: stitch the non-empty seat counsels.
+            counsel = " / ".join(c for c in counsels.values() if c)[:200]
+        self.counsel = counsel[:200]
+
+        if crisis:
+            self.crisis_councils += 1
+            sim.log(f"MAGI: 臨時評定 — {self.counsel}")
+        else:
+            self.councils_held += 1
+            sim.log(f"MAGI: 朝の評定 — {self.counsel}")
+
+    def _pilot_relay(
+        self, obs: dict, budget: ThinkingBudget, *, gemma_up: bool,
+    ) -> GameAction:
+        """Gemwen relay: Gemma (:8102) thinks the aim given obs + 評定, then Qwen
+        (:8011) emits the schema-forced action with the think + 評定 appended."""
+        import json
+
+        counsel = self.counsel or "(評定なし)"
+        # (1) think call to Gemma (falls back to Qwen if Gemma is down).
+        think_brain = self.balthasar if (gemma_up and self.balthasar) else self.melchior
+        think_user = json.dumps(
+            {"observation": obs, "今日の評定": counsel}, ensure_ascii=False
+        )
+        try:
+            think = think_brain.think_freetext(
+                PILOT_THINK_PROMPT, think_user, max_tokens=120
+            ).strip()
+        except Exception:  # noqa: BLE001
+            think = ""
+        self.last_pilot_think = think
+
+        # (2) action call to Qwen with the think + 評定 appended.
+        extra = [{
+            "role": "assistant",
+            "content": f"今日の評定: {counsel}\n操縦士の狙い: {think}",
+        }]
+        try:
+            return self.melchior.propose_action(obs, budget, extra=extra)
+        except (ActionParseError, RuntimeError, Exception):  # noqa: BLE001
+            return GameAction(action="rest", args={}, think="(pilot failed)", say="")
+
+    @staticmethod
+    def _sim_day(sim: object) -> int:
+        try:
+            return int(sim.world.day)
+        except Exception:  # noqa: BLE001
+            return 0
+
+    @staticmethod
+    def _is_crisis(sim: object) -> bool:
+        """Crisis floors: water≤20 or hunger≤10 or hp≤30 → reconvene once."""
+        try:
+            hero = sim.hero
+            return hero.water <= 20 or hero.hunger <= 10 or hero.hp <= 30
+        except Exception:  # noqa: BLE001
+            return False
+
+    # ====================================================================
+    # v1 committee mode: the council per turn (unchanged).
+    # ====================================================================
+    def _choose_committee(self, sim: object) -> GameAction:
         self.calls += 1
         budget = self.melchior.current_tier()
         self.tier_history.append(budget.name)
@@ -429,10 +652,22 @@ class MagiBrain:
 # ====================================================================
 # make_magi — build a council from config/models.toml.
 # ====================================================================
-def make_magi(config_path: str | Path, *, timeout: float = 45.0) -> MagiBrain:
+def magi_mode_for_cassette(name: str | None) -> str:
+    """CLI/UI routing: cassette name "MAGI-V1" → committee (v1), anything else
+    (incl. "MAGI") → pilot (v2, default)."""
+    return "committee" if name == "MAGI-V1" else "pilot"
+
+
+def make_magi(
+    config_path: str | Path, *, timeout: float = 45.0, mode: str = "pilot",
+) -> MagiBrain:
     """Look up the MELCHIOR / BALTHASAR / CASPER cassettes by name and build the
     council. MELCHIOR must exist (the spine); BALTHASAR may be unreachable at
-    build time (the council degrades to MELCHIOR-only on the first turn)."""
+    build time (the council degrades to MELCHIOR-only on the first turn).
+
+    mode="pilot" (default) builds the v2 評議と操縦の分離 brain; mode="committee"
+    builds the v1 per-turn deliberation brain. The identity cassette is "MAGI"
+    for pilot and "MAGI-V1" for committee so the journal keys distinctly."""
     config_path = Path(config_path)
     cassettes = {c.name: c for c in load_cassettes(config_path)}
     if "MELCHIOR" not in cassettes:
@@ -446,5 +681,11 @@ def make_magi(config_path: str | Path, *, timeout: float = 45.0) -> MagiBrain:
     casper = None
     if "CASPER" in cassettes and cassettes["CASPER"].base_url:
         casper = OpenAICompatibleBrain(cassettes["CASPER"], timeout=timeout)
-    identity = cassettes.get("MAGI") or Cassette(name="MAGI", base_url="", model="magi")
-    return MagiBrain(melchior, balthasar, casper, identity=identity)
+    mode = "committee" if str(mode) == "committee" else "pilot"
+    id_name = "MAGI-V1" if mode == "committee" else "MAGI"
+    identity = (
+        cassettes.get(id_name)
+        or cassettes.get("MAGI")
+        or Cassette(name=id_name, base_url="", model="magi")
+    )
+    return MagiBrain(melchior, balthasar, casper, identity=identity, mode=mode)

@@ -153,7 +153,7 @@ def run_evolve(args: object) -> int:
     # The MAGI council marker has an empty base_url but IS an LLM brain.
     use_llm = args.llm
     if use_llm is None:
-        use_llm = bool(getattr(cassette, "base_url", "")) or getattr(cassette, "name", None) == "MAGI"
+        use_llm = bool(getattr(cassette, "base_url", "")) or getattr(cassette, "name", None) in ("MAGI", "MAGI-V1")
 
     return _run_evolve(
         lives=args.lives,

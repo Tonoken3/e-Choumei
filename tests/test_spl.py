@@ -1102,15 +1102,19 @@ class _FakeSeat:
         self.propose_calls = 0
         self.think_calls = 0
         self.chat_calls = 0
+        self.last_propose_extra = None       # the `extra` messages of the last action call
+        self.think_systems: list[str] = []   # system prompts seen by think_freetext
 
     def propose_action(self, obs, budget=None, extra=None):
         self.propose_calls += 1
+        self.last_propose_extra = extra
         if not self._alive:
             raise RuntimeError("seat down")
         return self._action
 
     def think_freetext(self, system, user, max_tokens=128):
         self.think_calls += 1
+        self.think_systems.append(system)
         if not self._alive:
             raise RuntimeError("seat down")
         return self._think
@@ -1132,9 +1136,10 @@ class MagiCouncilTests(unittest.TestCase):
         return Simulation(seed=42, max_days=112)
 
     def _council(self, mel, bal, casp=None):
+        # These tests exercise the v1 per-turn deliberation → committee mode.
         from spl.agent.magi import MagiBrain
 
-        return MagiBrain(mel, bal, casp)
+        return MagiBrain(mel, bal, casp, mode="committee")
 
     def test_majority_shortcut_picks_the_2_1_winner(self) -> None:
         gather = GameAction(action="gather", args={}, say="採取")
@@ -1291,6 +1296,124 @@ class MagiCouncilTests(unittest.TestCase):
         council = MagiBrain(mel, bal, None)
         articles = council.compile_canon(_FakeBook())
         self.assertEqual(articles, ["素案一", "素案二", "素案三", "素案四", "素案五"])
+
+
+class MagiPilotModeTests(unittest.TestCase):
+    """v2 操縦 (pilot) mode — 評議と操縦の分離."""
+
+    def _sim(self):
+        return Simulation(seed=42, max_days=112)
+
+    def _pilot(self, mel, bal, casp=None):
+        from spl.agent.magi import MagiBrain
+
+        return MagiBrain(mel, bal, casp, mode="pilot")
+
+    def test_default_mode_is_pilot(self) -> None:
+        from spl.agent.magi import MagiBrain
+
+        b = MagiBrain(_FakeSeat(GameAction(action="rest", args={})), None)
+        self.assertEqual(b.mode, "pilot")
+
+    def test_council_convenes_exactly_once_per_day(self) -> None:
+        g = GameAction(action="gather", args={}, say="g")
+        mel = _FakeSeat(g, think="計画")
+        bal = _FakeSeat(g, think="評定")
+        casp = _FakeSeat(g)
+        council = self._pilot(mel, bal, casp)
+        sim = self._sim()
+        # Three turns on the SAME day → one morning council only.
+        for _ in range(3):
+            council.choose(sim)
+        self.assertEqual(council.councils_held, 1)
+        self.assertEqual(council.crisis_councils, 0)
+        self.assertEqual(council.pilot_turns, 3)
+        # Advance the in-game day → a second morning council convenes.
+        sim.world.day += 1
+        council.choose(sim)
+        self.assertEqual(council.councils_held, 2)
+
+    def test_crisis_reconvenes_once_per_day(self) -> None:
+        g = GameAction(action="drink", args={}, say="g")
+        council = self._pilot(_FakeSeat(g), _FakeSeat(g), _FakeSeat(g))
+        sim = self._sim()
+        council.choose(sim)                     # morning council (healthy)
+        self.assertEqual(council.councils_held, 1)
+        self.assertEqual(council.crisis_councils, 0)
+        # Drive water through the crisis floor (≤20) → one re-council.
+        sim.hero.water = 15
+        council.choose(sim)
+        self.assertEqual(council.crisis_councils, 1)
+        # Still in crisis on the next turn, same day → NO second reconvene.
+        council.choose(sim)
+        self.assertEqual(council.crisis_councils, 1)
+
+    def test_counsel_reaches_the_pilots_messages(self) -> None:
+        # Synthesis call returns this 評定; it must appear in the pilot action's
+        # extra messages (Qwen seat) every turn that day.
+        g = GameAction(action="gather", args={}, say="g")
+        mel = _FakeSeat(g, think="操縦の狙い")
+        bal = _FakeSeat(g, think="その日の評定: 井戸を掘れ")
+        council = self._pilot(mel, bal, _FakeSeat(g))
+        council.choose(self._sim())
+        self.assertTrue(council.counsel)
+        extra = mel.last_propose_extra
+        self.assertIsNotNone(extra)
+        blob = " ".join(m["content"] for m in extra)
+        self.assertIn(council.counsel, blob)
+        self.assertIn("今日の評定", blob)
+
+    def test_council_seat_prompt_states_the_role_fact(self) -> None:
+        from spl.agent.magi import COUNCIL_ROLE_FACT, _council_seat_prompt
+
+        for seat in ("melchior", "balthasar", "casper"):
+            self.assertIn(COUNCIL_ROLE_FACT, _council_seat_prompt(seat))
+            self.assertIn("操縦はGemwenが行う", _council_seat_prompt(seat))
+
+    def test_role_fact_reaches_seat_think_calls(self) -> None:
+        g = GameAction(action="rest", args={})
+        mel = _FakeSeat(g)
+        bal = _FakeSeat(g)
+        council = self._pilot(mel, bal, _FakeSeat(g))
+        council.choose(self._sim())
+        # The role fact must appear in at least one seat's think system prompt.
+        seen = mel.think_systems + bal.think_systems
+        self.assertTrue(any("操縦はGemwenが行う" in s for s in seen))
+
+    def test_pilot_status_line(self) -> None:
+        g = GameAction(action="rest", args={})
+        council = self._pilot(_FakeSeat(g), _FakeSeat(g), _FakeSeat(g))
+        council.choose(self._sim())
+        line = council.status_line()
+        self.assertIn("MAGI操縦", line)
+        self.assertIn("評定1", line)
+        self.assertIn("手数1", line)
+
+    def test_committee_mode_preserves_v1_behavior(self) -> None:
+        from spl.agent.magi import MagiBrain
+
+        a = GameAction(action="gather", args={}, say="a")
+        b = GameAction(action="rest", args={}, say="b")
+        c = GameAction(action="drink", args={}, say="c")
+        mel = _FakeSeat(a)
+        bal = _FakeSeat(b, think="bを採れ")
+        casp = _FakeSeat(c)
+        council = MagiBrain(mel, bal, casp, mode="committee")
+        council.choose(Simulation(seed=42, max_days=112))
+        rec = council.turn_records[-1]
+        # v1 three-way split → moderator path, v1 status line, no pilot counters.
+        self.assertFalse(rec["agreed"])
+        self.assertTrue(rec["moderator_used"])
+        self.assertIn("合議", council.status_line())
+        self.assertEqual(council.pilot_turns, 0)
+        self.assertEqual(council.councils_held, 0)
+
+    def test_cassette_name_routes_mode(self) -> None:
+        from spl.agent.magi import magi_mode_for_cassette
+
+        self.assertEqual(magi_mode_for_cassette("MAGI"), "pilot")
+        self.assertEqual(magi_mode_for_cassette(None), "pilot")
+        self.assertEqual(magi_mode_for_cassette("MAGI-V1"), "committee")
 
 
 if __name__ == "__main__":

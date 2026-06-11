@@ -213,11 +213,15 @@ def _make_brain(args: object) -> object | None:
     if not getattr(args, "llm", False):
         return None
     name = getattr(args, "cassette", None)
-    # --cassette MAGI builds the合議制 council (MELCHIOR/BALTHASAR/CASPER) in code.
-    if name == "MAGI":
-        from spl.agent.magi import make_magi
+    # --cassette MAGI builds the MAGI brain in code: "MAGI" → v2 pilot (default),
+    # "MAGI-V1" → v1 committee (評議と操縦の分離).
+    if name in ("MAGI", "MAGI-V1"):
+        from spl.agent.magi import magi_mode_for_cassette, make_magi
 
-        return make_magi(PROJECT_ROOT / "config" / "models.toml")
+        return make_magi(
+            PROJECT_ROOT / "config" / "models.toml",
+            mode=magi_mode_for_cassette(name),
+        )
     cassette = find_cassette(PROJECT_ROOT / "config" / "models.toml", name)
     if not cassette.base_url:
         return None

@@ -108,4 +108,17 @@ api_key = "local"
 temperature = 0.6
 max_tokens = 384
 json_mode = true
-persona = "MAGI 合議制 — 三賢人の評議で一手を裁定する。"
+persona = "MAGI v2 操縦 — 朝の評定が一日の方針を書き、操縦士Gemwenだけが飛ぶ(評議と操縦の分離)。"
+
+# MAGI-V1: 旧・委員会制(毎ターン三機関が合議して一手を裁定する v1)。--cassette MAGI-V1
+# で make_magi(mode="committee") を組む。v1の所見(合議70/全会一致0/空振り57@7日)を
+# v2と比較するための保存版。同じMELCHIOR/BALTHASAR/CASPERの席を束ねる。
+[[cassette]]
+name = "MAGI-V1"
+base_url = ""
+model = "magi"
+api_key = "local"
+temperature = 0.6
+max_tokens = 384
+json_mode = true
+persona = "MAGI v1 委員会 — 毎ターン三賢人の評議で一手を裁定する(保存版)。"

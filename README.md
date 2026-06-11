@@ -111,9 +111,11 @@ python3 -m spl evolve --lives 4 --seed 0 --days 5 --no-llm             # 局所�
 
 各生の後に `life N: D日 score S ending=… canon_rev=R` と改訂後の5条を逐次表示し（`tail -f` で監視可）、最後に days 一覧・平均・最大・最終家訓を出します。`canon.revision` は何度編纂されたかを表し、`canon.lessons` は常に5条以内です。
 
-## MAGI 合議制（三賢人の評議で一手を裁定する）
+## MAGI（三賢人の脳）— v2 操縦（評議と操縦の分離）／ v1 委員会
 
-一台のモデルに委ねるのではなく、**三つの人格に合議**させて次の一手を決める脳が `--cassette MAGI` です（『エヴァンゲリオン』のMAGIになぞらえた三席評議）。三席はそれぞれ独立したOpenAI互換サーバの仙人脳で、二つのサーバ（Qwen=思考役 / Gemma=発話役）を束ねます。
+**v2「操縦」（`--cassette MAGI`、既定）**: 合議は**評議（REVIEW）には強いが操縦（CONTROL）には弱い**——実走の所見がそれを示しました。v1で7日生きた一生は **合議70回・全会一致0回・空振り（空振り＝世界に弾かれた手）57回**。毎ターン三席で多数決を取ると、迷い・分裂・整形のたびに手がぶれて長持ちしません。そこでv2は二つを分けます。**朝の評定**——その日最初の一手で三席が短く生存助言を述べ（操縦はしない）、Gemmaが一つの「その日の評定」（≤200字）にまとめる。水≤20／空腹≤10／HP≤30の**危機**ではその日一度だけ評定を組み直す。**操縦**——以後は毎ターン**操縦士Gemwen一人**が飛ぶ。Gemma（`:8102`）が評定と観測から次の一手の狙いを二文で考え、Qwen（`:8011`）がその狙い＋評定を携えてスキーマ強制の行動を発話（2コール／ターン）。評定は脳に載り（観戦者の作戦チャンネルとは別）、その日ずっと両コールへ注入されます。状態表示は `MAGI操縦 評定N(臨時M) 手数K`。`--cassette MAGI-V1` で従来の委員会（下記）に切り替わります。
+
+**v1「委員会」（`--cassette MAGI-V1`、保存版）**: 一台のモデルに委ねるのではなく、**三つの人格に合議**させて毎ターンの一手を決める脳（『エヴァンゲリオン』のMAGIになぞらえた三席評議）。三席はそれぞれ独立したOpenAI互換サーバの仙人脳で、二つのサーバ（Qwen=思考役 / Gemma=発話役）を束ねます。
 
 | 席 | 人格 | サーバ | 役割 |
 |---|---|---|---|
@@ -129,13 +131,15 @@ python3 -m spl evolve --lives 4 --seed 0 --days 5 --no-llm             # 局所�
 CUDA_VISIBLE_DEVICES=3,4 NCCL_P2P_DISABLE=1 \
   vllm serve <SuperGemma4-NVFP4> --tensor-parallel-size 2 --disable-custom-all-reduce \
   --max-model-len 6144 --gpu-memory-utilization 0.90 --port 8102 --enforce-eager
-# 合議制で観戦 / 編纂
-python3 -m spl pixel    --llm --cassette MAGI            # 三賢人の評議を観る
+# v2 操縦で観戦 / 編纂（既定）
+python3 -m spl pixel    --llm --cassette MAGI            # 朝の評定→Gemwenが飛ぶのを観る
 python3 -m spl simulate --llm --cassette MAGI --seed 42
 python3 -m spl evolve   --lives 4 --cassette MAGI --book # 編纂評議会で家訓を磨く
+# v1 委員会（保存版・比較用）
+python3 -m spl simulate --llm --cassette MAGI-V1 --seed 42
 ```
 
-`config/models.toml` の `MELCHIOR` / `BALTHASAR` / `CASPER` カセットが各サーバ（`:8011` / `:8102`）を指し、`make_magi()` がコード側で評議脳を組みます。`MAGI` という名のマーカーカセット（`base_url` 空）が `--cassette MAGI` の目印です。
+`config/models.toml` の `MELCHIOR` / `BALTHASAR` / `CASPER` カセットが各サーバ（`:8011` / `:8102`）を指し、`make_magi(mode=...)` がコード側で脳を組みます。マーカーカセット（`base_url` 空）は二つ: `MAGI`→v2操縦、`MAGI-V1`→v1委員会。どちらも同じ三席を束ね、家訓の編纂（編纂評議会）は両モード共通です。
 
 ### 編纂評議会（毒の条文を狩る）
 
