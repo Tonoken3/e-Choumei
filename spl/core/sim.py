@@ -218,6 +218,12 @@ class Simulation:
         cleaned = (text or "").strip() or None
         if cleaned is not None and cleaned != self.advice_from_heaven:
             self.strategy_changes += 1
+            # 啓示: a NEW directive rings once in the world log so it lands in
+            # the "recent" window the brain reads. Once — a hermit who hears
+            # voices every turn is a different character (電波系).
+            self.log(f"Heaven speaks: {cleaned}")
+        elif cleaned is None and self.advice_from_heaven is not None:
+            self.log("Heaven falls silent.")
         self.advice_from_heaven = cleaned
 
     def set_diarist(self, diarist: object | None) -> None:

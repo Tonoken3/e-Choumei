@@ -697,6 +697,48 @@ class PitwallRegressionTests(unittest.TestCase):
         self.assertEqual(app.heaven_text, "井戸を掘れ")
 
 
+class ConditionGateTests(unittest.TestCase):
+    """内省は満腹の上に立つ: the body caps the effective thinking tier."""
+
+    def _hero(self, **kw):
+        from types import SimpleNamespace
+
+        base = dict(hp=100, hunger=80, water=80, stamina=90, sanity=85)
+        base.update(kw)
+        return SimpleNamespace(**base)
+
+    def test_nourished_hermit_is_uncapped(self) -> None:
+        from spl.agent.llm_client import _TIERS, condition_cap_index
+
+        idx, reason = condition_cap_index(self._hero())
+        self.assertEqual(idx, len(_TIERS) - 1)
+        self.assertIsNone(reason)
+
+    def test_starving_hermit_drops_to_reflex(self) -> None:
+        from spl.agent.llm_client import condition_cap_index
+
+        self.assertEqual(condition_cap_index(self._hero(hunger=0))[0], 0)
+        self.assertEqual(condition_cap_index(self._hero(water=5))[0], 0)
+        self.assertEqual(condition_cap_index(self._hero(sanity=15))[0], 0)
+
+    def test_weary_hermit_loses_introspection(self) -> None:
+        from spl.agent.llm_client import _TIERS, condition_cap_index
+
+        idx, reason = condition_cap_index(self._hero(hunger=20))
+        self.assertEqual(idx, 1)
+        self.assertFalse(_TIERS[idx].verify, "a weary hermit cannot introspect")
+        self.assertEqual(reason, "疲弊")
+
+    def test_new_strategy_rings_once_in_the_log(self) -> None:
+        from spl.core.sim import Simulation
+
+        sim = Simulation(seed=11, max_days=10)
+        sim.set_strategy("井戸を掘れ")
+        sim.set_strategy("井戸を掘れ")  # same text: no second revelation
+        rings = [ln for ln in sim.full_log if "Heaven speaks" in ln]
+        self.assertEqual(len(rings), 1)
+
+
 if __name__ == "__main__":
     unittest.main()
 

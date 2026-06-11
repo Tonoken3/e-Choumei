@@ -44,6 +44,9 @@ the simulation reject it? Common world-rejects to catch:
 If a proposal would be rejected, return a CORRECTED action that will succeed now.
 If several proposals are given, pick the best VALID one. If the action is already
 fine, return it unchanged.
+Also weigh strategy_from_heaven (the watcher's standing order): among valid
+choices, prefer the one that follows it. Never let the order force an action
+the world would reject.
 Return exactly one JSON object with the SAME keys: {"think":"...","action":"...","args":{...},"say":"..."}.
 "say" must stay IN JAPANESE (文豪風); never English. Use only a listed action.
 Never use code fences. Never output anything except JSON.

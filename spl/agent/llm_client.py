@@ -110,6 +110,23 @@ _TIERS: tuple[ThinkingBudget, ...] = (
 )
 
 
+def condition_cap_index(hero: object) -> tuple[int, str | None]:
+    """内省は満腹の上に立つ — the body gates the mind (自然の摂理).
+
+    Returns (max tier index, reason). A starving, parched or broken hermit
+    cannot run a careful verify pass no matter how fast the rig is; only a
+    nourished one can introspect. Revelation (天の声) still reaches them —
+    that is what the watcher is for.
+    """
+    if hero.hp <= 25 or hero.sanity <= 20:
+        return 0, "心身衰弱"
+    if hero.hunger <= 0 or hero.water <= 10:
+        return 0, "飢渇"
+    if hero.hunger <= 25 or hero.water <= 25 or hero.sanity <= 40 or hero.stamina <= 15:
+        return 1, "疲弊"
+    return len(_TIERS) - 1, None
+
+
 def tier_for_tps(tps: float) -> ThinkingBudget:
     """Map a measured tokens/sec to a 思考予算 tier.
 
@@ -229,9 +246,15 @@ class OpenAICompatibleBrain:
         return tier_for_tps(self.avg_tps())
 
     def status_line(self) -> str:
-        """e.g. '羅漢 212t/s 検証修正3' for the UIs."""
+        """e.g. '羅漢 212t/s 検証修正3', or '羅漢→雲水(飢渇) ...' when the
+        hermit's condition has capped the effective tier."""
         tier = self.current_tier()
-        return f"{tier.name} {self.avg_tps():.0f}t/s 検証修正{self.verify_corrections}"
+        name = tier.name
+        eff = getattr(self, "effective_tier_name", None)
+        note = getattr(self, "condition_note", None)
+        if eff and note and eff != name:
+            name = f"{name}→{eff}({note})"
+        return f"{name} {self.avg_tps():.0f}t/s 検証修正{self.verify_corrections}"
 
     def _record_tps(self, completion_tokens: int, seconds: float) -> None:
         if self.forced_tps > 0 or seconds <= 0 or completion_tokens <= 0:
@@ -241,6 +264,15 @@ class OpenAICompatibleBrain:
     def choose(self, sim: object) -> GameAction:
         self.calls += 1
         budget = self.current_tier()
+        # 内省は満腹の上に立つ: the hermit's condition caps the effective tier.
+        cap_idx, cap_reason = condition_cap_index(sim.hero)
+        hw_idx = _TIERS.index(budget)
+        if cap_idx < hw_idx:
+            budget = _TIERS[cap_idx]
+            self.condition_note = cap_reason
+        else:
+            self.condition_note = None
+        self.effective_tier_name = budget.name
         self.tier_history.append(budget.name)
         obs = self.observer.build(sim)
         messages = [
