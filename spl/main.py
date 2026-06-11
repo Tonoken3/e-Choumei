@@ -55,6 +55,36 @@ def build_parser() -> argparse.ArgumentParser:
     pixel.add_argument("--shot-dir", default="/tmp/spl_px", help=argparse.SUPPRESS)
     pixel.set_defaults(func=run_pixel)
 
+    evolve = sub.add_parser(
+        "evolve",
+        help="家訓の編纂: run N lives, revising the fixed 5-article canon after each",
+    )
+    evolve.add_argument("--lives", type=int, required=True, help="how many lives to run")
+    evolve.add_argument("--seed", type=int, default=42)
+    evolve.add_argument("--days", type=int, default=112)
+    evolve.add_argument("--cassette", default="Qwen仙人vLLM", help="cassette name from config/models.toml")
+    evolve.add_argument(
+        "--llm",
+        dest="llm",
+        action="store_true",
+        default=None,
+        help="use the cassette's LLM 編纂者+brain (default: on when the cassette has a base_url)",
+    )
+    evolve.add_argument(
+        "--no-llm",
+        dest="llm",
+        action="store_false",
+        help="local brain + deterministic 編纂 (no server needed)",
+    )
+    evolve.add_argument(
+        "--tps",
+        type=float,
+        default=0.0,
+        help="思考予算: force a constant tokens/sec (0=auto-measure)",
+    )
+    evolve.add_argument("--book-dir", default=None, help="argparse passthrough; SPL_BOOK_DIR overrides the journal dir")
+    evolve.set_defaults(func=run_evolve)
+
     arena = sub.add_parser("arena", help="compare cassettes on one seed, or one brain over many seeds")
     arena.add_argument("--seeds", default="42,43,44,45", help="comma-separated seeds (local sweep mode)")
     arena.add_argument("--seed", type=int, default=42, help="fixed seed when comparing cassettes")
@@ -94,6 +124,44 @@ def run_pixel(args: object) -> int:
     from spl.ui.pixel import run_pixel as _run_pixel
 
     return _run_pixel(args)
+
+
+def run_evolve(args: object) -> int:
+    import os
+
+    from spl.agent.llm_client import find_cassette
+    from spl.arena.evolve import run_evolve as _run_evolve
+    from spl.core.sim import PROJECT_ROOT
+    from spl.ui.cli import _apply_tps_override
+
+    # --book-dir is a convenience for SPL_BOOK_DIR (the journal directory).
+    if getattr(args, "book_dir", None):
+        os.environ["SPL_BOOK_DIR"] = args.book_dir
+
+    name = getattr(args, "cassette", None)
+    try:
+        cassette = find_cassette(PROJECT_ROOT / "config" / "models.toml", name)
+    except ValueError:
+        # --no-llm runs need no real cassette; key the journal by the name only.
+        from spl.agent.llm_client import Cassette
+
+        if args.llm:
+            raise
+        cassette = Cassette(name=name or "Evolve仙人", base_url="")
+    cassette = _apply_tps_override(cassette, args)
+    # --llm defaults to True when the cassette has a base_url; --no-llm forces local.
+    use_llm = args.llm
+    if use_llm is None:
+        use_llm = bool(getattr(cassette, "base_url", ""))
+
+    return _run_evolve(
+        lives=args.lives,
+        seed=args.seed,
+        days=args.days,
+        cassette=cassette,
+        use_llm=use_llm,
+        book_dir_cassette=getattr(args, "cassette", None),
+    )
 
 
 def run_arena(args: object) -> int:

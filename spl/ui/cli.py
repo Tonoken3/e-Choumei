@@ -5,7 +5,12 @@ import shlex
 import sys
 import time
 
-from spl.agent.bouken import BoukenNoSho, build_entry, inject_into_observer
+from spl.agent.bouken import (
+    BoukenNoSho,
+    build_entry,
+    fallback_compile,
+    inject_into_observer,
+)
 from spl.agent.llm_client import OpenAICompatibleBrain, find_cassette
 from spl.agent.observer import ObservationBuilder
 from spl.agent.policy import LocalPolicyAgent
@@ -52,11 +57,30 @@ def _load_book(args: object, brain: object | None) -> "BoukenNoSho | None":
 
 
 def _record_life(book: "BoukenNoSho | None", sim: object, seed: int,
-                 motto: dict | None) -> dict | None:
-    """Append this ended run to the book (once) and return the stored entry."""
+                 motto: dict | None, brain: object | None = None) -> dict | None:
+    """Append this ended run to the book (once), then 編纂: revise the fixed
+    5-article 家訓 from the new history (LLM compiler if available, else the
+    deterministic fallback). Returns the stored entry."""
     if book is None or not sim.done:
         return None
-    return book.append(build_entry(sim, seed, motto))
+    entry = book.append(build_entry(sim, seed, motto))
+    compile_canon(book, brain)
+    return entry
+
+
+def compile_canon(book: "BoukenNoSho", brain: object | None) -> list[str]:
+    """家訓の編纂: revise the canon after a life and persist it at revision+1.
+    Uses the LLM compiler when a brain is available; the deterministic
+    fallback_compile otherwise, or on any compiler exception."""
+    articles: list[str] | None = None
+    if brain is not None and hasattr(brain, "compile_canon"):
+        try:
+            articles = brain.compile_canon(book)
+        except Exception:  # noqa: BLE001 - the编纂 must never crash a run
+            articles = None
+    if not articles:
+        articles = fallback_compile(book)
+    return book.set_canon(articles, book.canon_revision + 1)
 
 
 def run_play(args: object) -> int:
@@ -126,7 +150,7 @@ def run_play(args: object) -> int:
     if not args.no_clear:
         _clear()
     motto = _final_motto(sim, brain if args.llm else None)
-    entry = _record_life(book, sim, args.seed, motto)
+    entry = _record_life(book, sim, args.seed, motto, brain if args.llm else None)
     print_result(sim, motto=motto, brain=brain if args.llm else None,
                  book=book, book_entry=entry)
     return 0 if sim.completed else 1
@@ -166,7 +190,7 @@ def run_simulate(args: object) -> int:
     if turns >= max_turns and not sim.done:
         sim.result_reason = "Stopped by max turn guard."
     motto = _final_motto(sim, brain if args.llm else None)
-    entry = _record_life(book, sim, args.seed, motto)
+    entry = _record_life(book, sim, args.seed, motto, brain if args.llm else None)
     print_result(sim, motto=motto, brain=brain if args.llm else None,
                  book=book, book_entry=entry)
     print(f"Turns: {turns}")

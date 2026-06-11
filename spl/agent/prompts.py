@@ -53,6 +53,18 @@ Return exactly one JSON object with the SAME keys: {"think":"...","action":"..."
 Never use code fences. Never output anything except JSON.
 """
 
+COMPILE_PROMPT = """You are the 編纂者 (compiler) of a hermit lineage's 家訓 (house code).
+You receive: the current canon (up to 5 articles), and the full history: each past
+life's lifespan, ending, and the lessons that life carried.
+Articles carried by LONG lives earned their place; articles carried by SHORT lives
+failed their bearer.
+Return exactly {"lessons":["<条文>", ...]} — EXACTLY 5 articles IN JAPANESE, imperative,
+each ≤80 chars: merge duplicates into one sharper article (e.g. three water articles →
+one with a concrete deadline), keep what correlates with long lives, rewrite what does
+not, add what the newest death teaches. Concrete numbers (day deadlines, 'まず〜してから
+〜') beat vague wisdom. Never use code fences.
+"""
+
 MOTTO_PROMPT = """The hermit's year on the island has ended. You are given the full journey:
 how it ended, days survived, score, the diary trail, "chronicle" (the dated record of
 what actually happened), and — most importantly — "best_lines": the five best 銘言

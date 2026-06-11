@@ -14,6 +14,7 @@ from spl.core.actions import ACTION_WORDS, GameAction
 
 from .observer import ObservationBuilder
 from .prompts import (
+    COMPILE_PROMPT,
     DIARY_PROMPT,
     MOTTO_PROMPT,
     REPAIR_PROMPT,
@@ -196,6 +197,28 @@ def _motto_schema() -> dict[str, Any]:
                 },
             },
             "required": ["motto", "words", "highlights", "lessons"],
+        },
+    }
+
+
+def _compile_schema() -> dict[str, Any]:
+    # 家訓: EXACTLY 5 articles, each ≤80 chars. min==max==5 forces a fixed-size
+    # canon — the book is revised, never grown.
+    return {
+        "name": "house_code",
+        "strict": True,
+        "schema": {
+            "type": "object",
+            "additionalProperties": False,
+            "properties": {
+                "lessons": {
+                    "type": "array",
+                    "minItems": 5,
+                    "maxItems": 5,
+                    "items": {"type": "string", "maxLength": 80},
+                },
+            },
+            "required": ["lessons"],
         },
     }
 
@@ -436,6 +459,37 @@ class OpenAICompatibleBrain:
                     # ぼうけんのしょ: the three lessons the next life inherits.
                     "lessons": [str(s).strip() for s in lessons if str(s).strip()][:3],
                 }
+        return None
+
+    def compile_canon(self, book: object) -> list[str] | None:
+        """家訓の編纂: revise the lineage's fixed 5-article canon from the current
+        canon + the full history (each life's lifespan beside its lessons). The
+        编纂者 merges duplicates, keeps what long lives carried, rewrites what
+        short lives carried, and adds what the newest death teaches. Returns the
+        5 articles, or None on any failure (the caller then uses fallback_compile)."""
+        context = {
+            "canon": list(getattr(book, "canon", []) or []),
+            "history": book.history_table(),
+        }
+        messages = [
+            {"role": "system", "content": COMPILE_PROMPT + "\n" + self.cassette.persona},
+            {"role": "user", "content": json.dumps(context, ensure_ascii=False)},
+        ]
+        try:
+            raw = self._chat(messages, schema=_compile_schema(), max_tokens=768).strip()
+        except (RuntimeError, urllib.error.URLError):
+            return None
+        if not raw:
+            return None
+        for candidate in _iter_balanced_objects(raw):
+            try:
+                obj = json.loads(_remove_trailing_commas(candidate))
+            except json.JSONDecodeError:
+                continue
+            if isinstance(obj, dict) and isinstance(obj.get("lessons"), list):
+                lessons = [str(s).strip() for s in obj["lessons"] if str(s).strip()]
+                if lessons:
+                    return lessons[:5]
         return None
 
     def _resolve_model(self) -> str:

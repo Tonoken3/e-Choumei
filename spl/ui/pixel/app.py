@@ -505,11 +505,23 @@ class PixelApp:
             return
         if not self.sim.done or self._motto is None or self._motto_busy:
             return
-        from spl.agent.bouken import build_entry
+        from spl.agent.bouken import build_entry, fallback_compile
 
         self._book_entry = self.book.append(
             build_entry(self.sim, getattr(self.args, "seed", 0), self._motto)
         )
+        # 家訓の編纂: revise the fixed 5-article canon from the new history.
+        # LLM compiler when a brain is available; deterministic fallback on any
+        # exception so the result screen never crashes.
+        articles = None
+        if self.brain is not None and hasattr(self.brain, "compile_canon"):
+            try:
+                articles = self.brain.compile_canon(self.book)
+            except Exception:  # noqa: BLE001
+                articles = None
+        if not articles:
+            articles = fallback_compile(self.book)
+        self.book.set_canon(articles, self.book.canon_revision + 1)
         self._book_written = True
 
     def _brain_status(self) -> str:

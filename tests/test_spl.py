@@ -927,6 +927,165 @@ class BoukenNoShoTests(unittest.TestCase):
                     os.environ["SPL_BOOK_DIR"] = old
 
 
+class KakunTests(unittest.TestCase):
+    """家訓の編纂 — the fixed 5-article canon, revised not grown."""
+
+    def test_canon_round_trip_and_lessons_for_prefers_canon(self) -> None:
+        import tempfile
+
+        from spl.agent.bouken import BoukenNoSho
+
+        with tempfile.TemporaryDirectory() as tmp:
+            path = f"{tmp}/bouken_test.json"
+            book = BoukenNoSho.load(path)
+            self.assertEqual(book.canon, [])
+            self.assertEqual(book.canon_revision, 0)
+            book.append({"seed": 42, "days": 5, "lessons": ["古い教訓"]})
+            # set a canon and reload — it round-trips with its revision
+            book.set_canon(["第一条 水を掘れ", "第二条 火を建てよ"], 3)
+            reloaded = BoukenNoSho.load(path)
+            self.assertEqual(reloaded.canon, ["第一条 水を掘れ", "第二条 火を建てよ"])
+            self.assertEqual(reloaded.canon_revision, 3)
+            # canon WINS in lessons_for (the recent-lessons path is bypassed)
+            self.assertEqual(reloaded.lessons_for(42), ["第一条 水を掘れ", "第二条 火を建てよ"])
+            self.assertEqual(reloaded.lessons_for(999), ["第一条 水を掘れ", "第二条 火を建てよ"])
+
+    def test_lessons_for_falls_back_to_recent_when_no_canon(self) -> None:
+        # back-compat: no canon -> the original recent/same-seed behaviour.
+        import tempfile
+
+        from spl.agent.bouken import BoukenNoSho
+
+        with tempfile.TemporaryDirectory() as tmp:
+            book = BoukenNoSho.load(f"{tmp}/bouken_test.json")
+            book.append({"seed": 42, "lessons": ["水を掘れ"]})
+            self.assertEqual(book.canon, [])
+            self.assertEqual(book.lessons_for(42), ["水を掘れ"])
+
+    def test_canon_capped_at_five(self) -> None:
+        import tempfile
+
+        from spl.agent.bouken import BoukenNoSho
+
+        with tempfile.TemporaryDirectory() as tmp:
+            book = BoukenNoSho.load(f"{tmp}/bouken_test.json")
+            book.set_canon([f"条文{i}" for i in range(8)], 1)
+            self.assertEqual(len(book.canon), 5)
+
+    def test_history_table_pairs_lifespan_with_lessons(self) -> None:
+        import tempfile
+
+        from spl.agent.bouken import BoukenNoSho
+
+        with tempfile.TemporaryDirectory() as tmp:
+            book = BoukenNoSho.load(f"{tmp}/bouken_test.json")
+            book.append({"seed": 0, "days": 3, "ending": "渇き", "lessons": ["水"]})
+            book.append({"seed": 0, "days": 40, "ending": "生存", "lessons": ["火", "実"]})
+            table = book.history_table()
+            self.assertEqual(len(table), 2)
+            self.assertEqual(table[0], {"life": 1, "days": 3, "ending": "渇き", "lessons": ["水"]})
+            self.assertEqual(table[1]["days"], 40)
+            self.assertEqual(table[1]["lessons"], ["火", "実"])
+
+    def test_fallback_compile_dedupes_water_and_prefers_long_lives(self) -> None:
+        import tempfile
+
+        from spl.agent.bouken import BoukenNoSho, fallback_compile
+
+        with tempfile.TemporaryDirectory() as tmp:
+            book = BoukenNoSho.load(f"{tmp}/bouken_test.json")
+            # four water-themed near-duplicates across short lives + distinct
+            # articles from a long life that must be kept.
+            book.append({"seed": 1, "days": 4, "lessons": ["三日目までに水を確保せよ。"]})
+            book.append({"seed": 1, "days": 5, "lessons": ["二日目までに水を確保せよ"]})
+            book.append({"seed": 1, "days": 6, "lessons": ["まずは水を確保せよ動く前に"]})
+            book.append({"seed": 1, "days": 7, "lessons": ["朝いちで水を確保せよ毎日"]})
+            book.append({"seed": 1, "days": 80, "lessons": ["秋までに保存樽を建てよ", "焚き火を絶やすな"]})
+            canon = fallback_compile(book)
+            # near-duplicate water articles collapse to exactly one
+            water = [a for a in canon if "水" in a]
+            self.assertEqual(len(water), 1, f"water not merged: {canon}")
+            # the long life's distinct articles survived
+            self.assertTrue(any("保存樽" in a for a in canon))
+            self.assertTrue(any("焚き火" in a for a in canon))
+            # never more than 5
+            self.assertLessEqual(len(canon), 5)
+
+    def test_fallback_compile_caps_at_five(self) -> None:
+        import tempfile
+
+        from spl.agent.bouken import BoukenNoSho, fallback_compile
+
+        with tempfile.TemporaryDirectory() as tmp:
+            book = BoukenNoSho.load(f"{tmp}/bouken_test.json")
+            distinct = [
+                "水を切らすな掘削を急げ",
+                "森で薪を集め火種とせよ",
+                "畑を耕し蕪の種を蒔け",
+                "岩場で鉱石を掘り斧を鍛えよ",
+                "保存樽を建て冬に備えよ",
+                "釣り竿を作り魚を獲れ",
+                "住処を改修し寒気を防げ",
+            ]
+            for i, lesson in enumerate(distinct):
+                book.append({"seed": 1, "days": i + 1, "lessons": [lesson]})
+            self.assertEqual(len(fallback_compile(book)), 5)
+
+    def test_compile_schema_requires_exactly_five(self) -> None:
+        from spl.agent.llm_client import _compile_schema
+
+        schema = _compile_schema()["schema"]
+        self.assertIn("lessons", schema["required"])
+        lessons = schema["properties"]["lessons"]
+        self.assertEqual(lessons["minItems"], 5)
+        self.assertEqual(lessons["maxItems"], 5)
+        self.assertEqual(lessons["items"]["maxLength"], 80)
+
+    def test_compile_prompt_exists_and_demands_five_jp_articles(self) -> None:
+        from spl.agent.prompts import COMPILE_PROMPT
+
+        self.assertIn("編纂者", COMPILE_PROMPT)
+        self.assertIn("EXACTLY 5", COMPILE_PROMPT)
+        self.assertIn("JAPANESE", COMPILE_PROMPT)
+
+    def test_evolve_loop_two_lives_no_llm_writes_canon_rev_two(self) -> None:
+        import io
+        import os
+        import tempfile
+        from contextlib import redirect_stdout
+
+        from spl.agent.bouken import BoukenNoSho, book_path_for
+        from spl.arena.evolve import run_evolve
+
+        with tempfile.TemporaryDirectory() as tmp:
+            old = os.environ.get("SPL_BOOK_DIR")
+            os.environ["SPL_BOOK_DIR"] = tmp
+            try:
+                from spl.agent.llm_client import Cassette
+
+                buf = io.StringIO()
+                with redirect_stdout(buf):
+                    rc = run_evolve(
+                        lives=2, seed=0, days=5,
+                        cassette=Cassette(name="EvoTest", base_url=""),
+                        use_llm=False, book_dir_cassette="EvoTest",
+                    )
+                self.assertEqual(rc, 0)
+                out = buf.getvalue()
+                self.assertIn("life 1", out)
+                self.assertIn("life 2", out)
+                book = BoukenNoSho.load(book_path_for("EvoTest"))
+                self.assertEqual(book.lives, 2)
+                self.assertEqual(book.canon_revision, 2)
+                self.assertTrue(book.canon, "canon should be non-empty after evolve")
+                self.assertLessEqual(len(book.canon), 5)
+            finally:
+                if old is None:
+                    os.environ.pop("SPL_BOOK_DIR", None)
+                else:
+                    os.environ["SPL_BOOK_DIR"] = old
+
+
 if __name__ == "__main__":
     unittest.main()
 
