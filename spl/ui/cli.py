@@ -87,15 +87,20 @@ def run_play(args: object) -> int:
     return 0 if sim.completed else 1
 
 
-def _final_motto(sim: Simulation, brain: object | None) -> dict[str, str]:
+def _final_motto(sim: Simulation, brain: object | None) -> dict[str, object]:
+    motto = None
     if brain is not None and sim.done:
         try:
             motto = brain.write_motto(sim)
-            if motto:
-                return motto
         except Exception:  # noqa: BLE001 - the ending must never crash
-            pass
-    return fallback_motto(sim)
+            motto = None
+    if motto is None:
+        motto = fallback_motto(sim)
+    if not motto.get("highlights"):
+        from spl.agent.chronicle import jp_chronicle
+
+        motto["highlights"] = jp_chronicle(sim)
+    return motto
 
 
 def run_simulate(args: object) -> int:
@@ -224,7 +229,7 @@ def print_diary(sim: Simulation) -> None:
         print("-" * 40)
 
 
-def print_result(sim: Simulation, motto: dict[str, str] | None = None) -> None:
+def print_result(sim: Simulation, motto: dict[str, object] | None = None) -> None:
     print("SPL Result")
     print("=" * 72)
     motto = motto or fallback_motto(sim)
@@ -243,6 +248,10 @@ def print_result(sim: Simulation, motto: dict[str, str] | None = None) -> None:
     for item, amount in sorted(sim.hero.inventory.items()):
         if amount > 0:
             print(f"  {item}: {amount}")
+    print()
+    print("天の声の記録:")
+    for line in (motto.get("highlights") or [])[:5]:
+        print(f"  {line}")
     print()
     print("銘言ベスト5:")
     best = select_meigen(sim.hero.spoken_lines, 5)

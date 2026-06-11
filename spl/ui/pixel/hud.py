@@ -697,6 +697,16 @@ class Overlays:
                 surf.blit(_render(f.label, wln, pal.UI_GOLD), (x + lay.px(6), y))
                 y += qlh
 
+        highlights = (motto or {}).get("highlights") or []
+        if highlights:
+            y += lay.px(8)
+            surf.blit(_render(f.body, f.jp("天の声の記録:", "The watcher's record:"), pal.UI_TEXT), (x, y))
+            y += f.body.get_height() + lay.px(3)
+            for line in highlights[:5]:
+                for wln in _wrap(str(line), 62, 2):
+                    surf.blit(_render(f.label, wln, pal.UI_TEXT), (x + lay.px(6), y))
+                    y += qlh
+
         # Buttons along the bottom.
         btn_h = f.body.get_height() + lay.px(10)
         again_w = lay.px(220)

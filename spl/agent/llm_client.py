@@ -96,8 +96,14 @@ def _motto_schema() -> dict[str, Any]:
             "properties": {
                 "motto": {"type": "string", "maxLength": 90},
                 "words": {"type": "string", "maxLength": 160},
+                "highlights": {
+                    "type": "array",
+                    "minItems": 3,
+                    "maxItems": 5,
+                    "items": {"type": "string", "maxLength": 120},
+                },
             },
-            "required": ["motto", "words"],
+            "required": ["motto", "words", "highlights"],
         },
     }
 
@@ -181,9 +187,11 @@ class OpenAICompatibleBrain:
         cleaned = raw.strip("`").strip()
         return cleaned or None
 
-    def write_motto(self, sim: object) -> dict[str, str] | None:
-        """After the year ends, the hermit reads their own five best 銘言 and
-        distills a 座右の銘 — the final result screen's crown."""
+    def write_motto(self, sim: object) -> dict[str, object] | None:
+        """After the year ends, the hermit reads their own five best 銘言 and the
+        watcher's chronicle, then distills a 座右の銘 plus the heaven's-voice
+        highlights — the final result screen's crown."""
+        from spl.agent.chronicle import extract_milestones
         from spl.arena.leaderboard import select_meigen
 
         hero = sim.hero
@@ -195,13 +203,14 @@ class OpenAICompatibleBrain:
             "confusions": hero.confusion_count,
             "final_stats": {"hp": hero.hp, "hunger": hero.hunger, "water": hero.water, "sanity": hero.sanity},
             "best_lines": select_meigen(hero.spoken_lines, 5),
+            "chronicle": [ms["text"] for ms in extract_milestones(sim)],
             "diary_tail": [entry.text for entry in sim.memory.diary[-4:]],
         }
         messages = [
             {"role": "system", "content": MOTTO_PROMPT + "\n" + self.cassette.persona},
             {"role": "user", "content": json.dumps(context, ensure_ascii=False)},
         ]
-        raw = self._chat(messages, schema=_motto_schema(), max_tokens=512).strip()
+        raw = self._chat(messages, schema=_motto_schema(), max_tokens=768).strip()
         if not raw:
             return None
         for candidate in _iter_balanced_objects(raw):
@@ -210,9 +219,13 @@ class OpenAICompatibleBrain:
             except json.JSONDecodeError:
                 continue
             if isinstance(obj, dict) and obj.get("motto"):
+                highlights = obj.get("highlights") or []
+                if not isinstance(highlights, list):
+                    highlights = []
                 return {
                     "motto": str(obj["motto"]).strip(),
                     "words": str(obj.get("words", "")).strip(),
+                    "highlights": [str(h).strip() for h in highlights if str(h).strip()][:5],
                 }
         return None
 

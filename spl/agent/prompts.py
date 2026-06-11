@@ -30,12 +30,17 @@ Keep it under 240 characters. Never use code fences.
 """
 
 MOTTO_PROMPT = """The hermit's year on the island has ended. You are given the full journey:
-how it ended, days survived, score, the diary trail, and — most importantly —
-"best_lines": the five best 銘言 the hermit spoke this year (your own words).
-READ those five lines and distill ONE 座右の銘 that sums up the whole journey.
-Return exactly one JSON object: {"motto":"<座右の銘 一行>","words":"<辞世あるいは結びの一言>"}.
-Write IN JAPANESE, 文豪風. The motto must grow out of the five lines and the real
-ending (its true cause of death, or its true triumph). The words are the last remark.
+how it ended, days survived, score, the diary trail, "chronicle" (the dated record of
+what actually happened), and — most importantly — "best_lines": the five best 銘言
+the hermit spoke this year (your own words).
+READ the five lines and the chronicle, then return exactly one JSON object:
+{"motto":"<座右の銘 一行>","words":"<辞世あるいは結びの一言>","highlights":["<ハイライト>", ...]}
+Write IN JAPANESE, 文豪風.
+- motto: ONE engraved line distilled from the five lines and the real ending.
+- words: the hermit's last remark, first person.
+- highlights: 3 to 5 lines looking back at the year FROM THE WATCHER'S VIEW (天の声目線,
+  third person, e.g. 「五日目、渇きに膝をつく寸前で井戸の夢を見ていた」). Each line must
+  be anchored to a real dated event from the chronicle. No invented events.
 Never use code fences. Never output anything except JSON.
 """
 
