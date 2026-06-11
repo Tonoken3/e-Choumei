@@ -5,6 +5,12 @@ from spl.core.world import SEASON_NAMES, TILE_NAMES, WEATHER_NAMES
 
 
 class ObservationBuilder:
+    # ぼうけんのしょ: lessons written by PAST SELVES who died on this island. Set
+    # by the --book callers; empty (the default) means the book is off, and the
+    # observation omits the bouken_no_sho block entirely.
+    book_lessons: list[str] = []
+    book_lives: int = 0
+
     def build(self, sim: object) -> dict[str, object]:
         hero = sim.hero
         world = sim.world
@@ -23,11 +29,22 @@ class ObservationBuilder:
             crop = sim.crop_book.get(plot.crop)
             current = f"Field({crop.name}:{'ready' if plot.ready else str(plot.days_left) + 'd'})"
         alerts = self._alerts(sim)
-        return {
+        obs: dict[str, object] = {
             # The watcher's standing order (作戦). Placed at the TOP on purpose:
             # the watcher SEES THE TRUE WORLD STATE, so this outranks the hermit's
             # own (possibly wrong) beliefs. Persists day after day until changed.
             "strategy_from_heaven": sim.advice_from_heaven,
+        }
+        # ぼうけんのしょ: when past lives left lessons, they sit right below the
+        # watcher's order — 前世たちが死をもって書き残した教訓。weigh them like
+        # scripture. Omitted entirely when the book is off / empty.
+        lessons = list(getattr(self, "book_lessons", []) or [])
+        if lessons:
+            obs["bouken_no_sho"] = {
+                "lives": int(getattr(self, "book_lives", 0) or 0),
+                "lessons": lessons,
+            }
+        obs.update({
             "day": world.day,
             "season": SEASON_NAMES[world.season],
             "weather": WEATHER_NAMES[world.weather],
@@ -49,7 +66,8 @@ class ObservationBuilder:
             "alerts": alerts,
             "trade_offer": sim.current_offer.describe() if sim.current_offer else None,
             "memory": sim.memory.recent_context(days=4),
-        }
+        })
+        return obs
 
     def digest(self, sim: object) -> str:
         obs = self.build(sim)

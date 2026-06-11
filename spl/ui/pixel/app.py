@@ -234,6 +234,14 @@ class PixelApp:
         self._thread_busy = False
         self._thread_lock = threading.Lock()
 
+        # ぼうけんのしょ: load this cassette's journal and inject the past-life
+        # lessons into the brain's observer. The entry for THIS run is written
+        # once, after the motto resolves at sim.done (guarded by _book_written).
+        self.book = self._load_book()
+        self._book_written = False
+        self._book_entry: dict | None = None
+        self._inject_book()
+
     # -- window / scale / layout --------------------------------------------
     def _initial_window(self) -> tuple[int, int]:
         try:
@@ -464,6 +472,46 @@ class PixelApp:
             cassette = replace(cassette, tps=tps)
         return OpenAICompatibleBrain(cassette)
 
+    # -- ぼうけんのしょ -------------------------------------------------------
+    def _book_cassette_name(self) -> str:
+        if self.brain is not None:
+            name = getattr(getattr(self.brain, "cassette", None), "name", None)
+            if name:
+                return name
+        return getattr(self.args, "cassette", None) or "Local仙人"
+
+    def _load_book(self):
+        """Load this cassette's adventure book when --book is on, else None."""
+        if not bool(getattr(self.args, "book", False)):
+            return None
+        from spl.agent.bouken import BoukenNoSho
+
+        return BoukenNoSho.for_cassette(self._book_cassette_name())
+
+    def _inject_book(self) -> None:
+        """Hand the past-life lessons to the brain's observer for THIS run."""
+        if self.book is None or self.brain is None:
+            return
+        from spl.agent.bouken import inject_into_observer
+
+        observer = getattr(self.brain, "observer", None)
+        inject_into_observer(observer, self.book, getattr(self.args, "seed", 0))
+
+    def _maybe_write_book(self) -> None:
+        """Append this ended run to the book exactly once — after sim.done AND
+        the motto has resolved (so its lessons are recorded). [もう一度] resets
+        the guard via _rebuild_sim so each replayed life accumulates."""
+        if self.book is None or self._book_written:
+            return
+        if not self.sim.done or self._motto is None or self._motto_busy:
+            return
+        from spl.agent.bouken import build_entry
+
+        self._book_entry = self.book.append(
+            build_entry(self.sim, getattr(self.args, "seed", 0), self._motto)
+        )
+        self._book_written = True
+
     def _brain_status(self) -> str:
         """思考予算 tier+TPS line for the HUD, read from the brain safely."""
         if not self.llm_enabled or self.brain is None:
@@ -566,6 +614,13 @@ class PixelApp:
         self._approval_acked_day = self.sim.world.day
         self._motto = None
         self._motto_busy = False
+        # ぼうけんのしょ: [もう一度] is the NEXT life — reload the book so the
+        # lessons just written are visible to this run, re-inject, reset the
+        # write guard so this fresh life records exactly once.
+        self.book = self._load_book()
+        self._book_written = False
+        self._book_entry = None
+        self._inject_book()
         # reset the camera to the whole-island diorama for the fresh run
         self.cam_scale = self.fit_scale_val
         self.follow = False
@@ -1548,10 +1603,15 @@ class PixelApp:
         if self.sim.done:
             if self._motto is None and not self._motto_busy:
                 self._start_motto()
+            # ぼうけんのしょ: once the motto (and its lessons) has resolved, record
+            # this life exactly once.
+            self._maybe_write_book()
             hover = self._result_hover()
             self._hits["result"] = self.overlays.draw_result(
                 window, self.sim, lay, hover,
                 motto=self._motto, motto_pending=self._motto_busy,
+                book_lives=(self.book.lives if self.book is not None else 0),
+                book_entry=self._book_entry,
             )
             return
         # 承認制 pit-wall strip at the day boundary (under any open editor).

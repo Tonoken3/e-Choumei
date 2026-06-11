@@ -40,6 +40,11 @@ def build_parser() -> argparse.ArgumentParser:
     pixel.add_argument("--speed", type=int, default=3, choices=(1, 2, 3, 4, 5),
                        help="watch speed: 1 承認 / 2 遅 / 3 普 / 4 速 / 5 最速")
     pixel.add_argument("--strategy", default=None, help="set the initial standing 作戦 (天の声) before the run")
+    pixel.add_argument(
+        "--book",
+        action="store_true",
+        help="ぼうけんのしょ: 前世の教訓を次の生に届ける（cross-life lessons）",
+    )
     pixel.add_argument("--scale", type=int, default=0, choices=(0, 1, 2, 3),
                        help="window preset: 0=auto (Full HD if desktop allows, else 90%% of desktop), "
                             "1=small 1280x720, 2=fhd 1920x1080, 3=large 2560x1440")
@@ -76,6 +81,11 @@ def _add_common(parser: argparse.ArgumentParser) -> None:
         default=0.0,
         help="思考予算: force a constant tokens/sec (0=auto-measure). "
         "e.g. --tps 10 (雲水) or --tps 1000 (仙界)",
+    )
+    parser.add_argument(
+        "--book",
+        action="store_true",
+        help="ぼうけんのしょ: 前世の教訓を次の生に届ける（cross-life lessons）",
     )
 
 

@@ -5,6 +5,7 @@ import shlex
 import sys
 import time
 
+from spl.agent.bouken import BoukenNoSho, build_entry, inject_into_observer
 from spl.agent.llm_client import OpenAICompatibleBrain, find_cassette
 from spl.agent.observer import ObservationBuilder
 from spl.agent.policy import LocalPolicyAgent
@@ -28,6 +29,36 @@ HELP_TEXT = """Commands:
 """
 
 
+def _book_cassette_name(args: object, brain: object | None) -> str:
+    """The journal is keyed by cassette. LLM runs use the chosen cassette; a
+    local (non-LLM) run keys on its cassette name if given, else 'Local仙人'."""
+    name = getattr(args, "cassette", None)
+    if getattr(args, "llm", False) and brain is not None:
+        name = getattr(getattr(brain, "cassette", None), "name", None) or name
+    return name or "Local仙人"
+
+
+def _load_book(args: object, brain: object | None) -> "BoukenNoSho | None":
+    """When --book is on, load this cassette's adventure book and inject the
+    past-life lessons into the (LLM) brain's observer. Returns the book so the
+    caller can append the new life at the end. Local brains ignore the lessons
+    but the book still records their runs via the fallback lessons."""
+    if not getattr(args, "book", False):
+        return None
+    book = BoukenNoSho.for_cassette(_book_cassette_name(args, brain))
+    if brain is not None and getattr(brain, "observer", None) is not None:
+        inject_into_observer(brain.observer, book, getattr(args, "seed", 0))
+    return book
+
+
+def _record_life(book: "BoukenNoSho | None", sim: object, seed: int,
+                 motto: dict | None) -> dict | None:
+    """Append this ended run to the book (once) and return the stored entry."""
+    if book is None or not sim.done:
+        return None
+    return book.append(build_entry(sim, seed, motto))
+
+
 def run_play(args: object) -> int:
     sim = Simulation(seed=args.seed, max_days=args.days)
     if getattr(args, "strategy", None):
@@ -35,6 +66,7 @@ def run_play(args: object) -> int:
     local_agent = LocalPolicyAgent()
     brain = _make_brain(args)
     observer = ObservationBuilder()
+    book = _load_book(args, brain if args.llm else None)
     last_day = sim.world.day
     if args.llm and brain is not None:
         sim.set_diarist(brain)
@@ -93,8 +125,10 @@ def run_play(args: object) -> int:
         sim.result_reason = "Stopped by max turn guard."
     if not args.no_clear:
         _clear()
-    print_result(sim, motto=_final_motto(sim, brain if args.llm else None),
-                 brain=brain if args.llm else None)
+    motto = _final_motto(sim, brain if args.llm else None)
+    entry = _record_life(book, sim, args.seed, motto)
+    print_result(sim, motto=motto, brain=brain if args.llm else None,
+                 book=book, book_entry=entry)
     return 0 if sim.completed else 1
 
 
@@ -120,6 +154,7 @@ def run_simulate(args: object) -> int:
         sim.set_strategy(args.strategy)
     local_agent = LocalPolicyAgent()
     brain = _make_brain(args)
+    book = _load_book(args, brain if args.llm else None)
     if args.llm and brain is not None:
         sim.set_diarist(brain)
     max_turns = args.days * 50
@@ -130,8 +165,10 @@ def run_simulate(args: object) -> int:
         turns += 1
     if turns >= max_turns and not sim.done:
         sim.result_reason = "Stopped by max turn guard."
-    print_result(sim, motto=_final_motto(sim, brain if args.llm else None),
-                 brain=brain if args.llm else None)
+    motto = _final_motto(sim, brain if args.llm else None)
+    entry = _record_life(book, sim, args.seed, motto)
+    print_result(sim, motto=motto, brain=brain if args.llm else None,
+                 book=book, book_entry=entry)
     print(f"Turns: {turns}")
     if turns >= max_turns and not sim.done:
         print("Stopped by max turn guard.")
@@ -272,9 +309,19 @@ def print_diary(sim: Simulation) -> None:
 
 
 def print_result(sim: Simulation, motto: dict[str, object] | None = None,
-                 brain: object | None = None) -> None:
+                 brain: object | None = None, book: object | None = None,
+                 book_entry: dict | None = None) -> None:
     print("SPL Result")
     print("=" * 72)
+    # ぼうけんのしょ: this life's number and the three lessons it leaves the next.
+    if book is not None and book_entry is not None:
+        print(f"ぼうけんのしょ: {book_entry.get('life', book.lives)}回目の生")
+        lessons = book_entry.get("lessons") or []
+        if lessons:
+            print("次の生への教訓:")
+            for lesson in lessons:
+                print(f"  ・{lesson}")
+        print("-" * 72)
     motto = motto or fallback_motto(sim)
     print(f"座右の銘: 「{motto['motto']}」")
     if motto.get("words"):

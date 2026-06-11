@@ -795,15 +795,32 @@ class Overlays:
         return {"next": nxt, "edit": edit}
 
     def draw_result(self, surf, sim, lay: Layout, hover: str = "",
-                    motto: dict | None = None, motto_pending: bool = False):
+                    motto: dict | None = None, motto_pending: bool = False,
+                    book_lives: int = 0, book_entry: dict | None = None):
         """End-of-run panel. Returns {"again": rect, "quit": rect} in window
-        coords so the app can hit-test the [もう一度] / [終了] buttons."""
+        coords so the app can hit-test the [もう一度] / [終了] buttons.
+
+        When the adventure book is on, ``book_lives`` is this life's number and
+        ``book_entry`` carries the three lessons left for the next life."""
         pg = self.pg
         f = self.f
         rect = self._panel(surf, f.jp("結果", "Result"), lay, margin_ref=18)
         hero = sim.hero
         x = rect.x + lay.px(10)
         y = rect.y + f.big.get_height() + lay.px(10)
+        # ぼうけんのしょ: this life's number + the lessons it leaves the next.
+        if book_entry is not None or book_lives:
+            life_no = (book_entry or {}).get("life", book_lives)
+            slab = _render(f.body, f.jp(f"ぼうけんのしょ: {life_no}回目の生",
+                                        f"Adventure Book: life #{life_no}"), pal.UI_GOLD)
+            surf.blit(slab, (x, y))
+            y += f.body.get_height() + lay.px(3)
+            lessons = (book_entry or {}).get("lessons") or []
+            for lesson in lessons[:3]:
+                for wln in _wrap("・" + str(lesson), 52, 2):
+                    surf.blit(_render(f.label, wln, pal.UI_TEXT), (x + lay.px(6), y))
+                    y += f.label.get_height() + lay.px(2)
+            y += lay.px(6)
         # The crown of the run: the hermit's own 座右の銘, distilled from the
         # year's five best lines (LLM-written when a brain played).
         if motto_pending and not motto:

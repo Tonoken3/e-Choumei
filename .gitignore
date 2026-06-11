@@ -7,3 +7,7 @@ build/
 *.egg-info/
 .DS_Store
 
+# ぼうけんのしょ — per-cassette adventure books (keep the dir, ignore the journals)
+savedata/*.json
+savedata/*.json.tmp
+

@@ -39,15 +39,63 @@ def fallback_motto(sim: object) -> dict[str, object]:
     hero = sim.hero
     tail = " ".join(sim.full_log[-12:])
     chronicle = jp_chronicle(sim)
+    # ぼうけんのしょ: each ending branch leaves three imperative lessons for the
+    # next life on this island (命令形, deterministic). The completion branch keeps
+    # the winning habits going; the death branches name the cause of death.
     if sim.completed:
-        return {"motto": "足るを知る者、冬を越ゆ。", "words": "島は何も約束せなんだが、裏切りもせなんだ。", "highlights": chronicle}
+        return {
+            "motto": "足るを知る者、冬を越ゆ。",
+            "words": "島は何も約束せなんだが、裏切りもせなんだ。",
+            "highlights": chronicle,
+            "lessons": [
+                "毎朝まず食料と水を確保せよ。冬を越えた習いを崩すな。",
+                "秋までに保存樽を建て、冬の蓄えを切らすな。",
+                "焚き火を絶やすな。火は飯と正気を守る。",
+            ],
+        }
     if "Dehydration" in tail or hero.water <= 0:
-        return {"motto": "水を恃む前に、水を掘れ。", "words": "渇きは、いつも計画より一日早い。", "highlights": chronicle}
+        return {
+            "motto": "水を恃む前に、水を掘れ。",
+            "words": "渇きは、いつも計画より一日早い。",
+            "highlights": chronicle,
+            "lessons": [
+                "毎朝最初に水を確保せよ。渇きは計画より一日早く来る。",
+                "早めに井戸を掘り、水辺だけに頼るな。",
+                "干ばつの兆しを見たら水を二倍に蓄えよ。",
+            ],
+        }
     if "Starvation" in tail or hero.hunger <= 0:
-        return {"motto": "飯は思想に先んず。", "words": "明日の備えを、今日の腹が追い越した。", "highlights": chronicle}
+        return {
+            "motto": "飯は思想に先んず。",
+            "words": "明日の備えを、今日の腹が追い越した。",
+            "highlights": chronicle,
+            "lessons": [
+                "食料の確保を毎朝最初に行え。",
+                "焚き火を早く建てて魚を焼け。生の魚に頼るな。",
+                "魚に固執せず木の実を先に拾え。",
+            ],
+        }
     if "Winter" in tail or "snow" in tail.lower():
-        return {"motto": "冬は約束どおりに来る。壁は約束より早く。", "words": "白い静寂に、火がひとつ足りなかった。", "highlights": chronicle}
-    return {"motto": "島は非情、されど公平なり。", "words": "敗れたのではない、学びが一年に間に合わなんだだけ。", "highlights": chronicle}
+        return {
+            "motto": "冬は約束どおりに来る。壁は約束より早く。",
+            "words": "白い静寂に、火がひとつ足りなかった。",
+            "highlights": chronicle,
+            "lessons": [
+                "秋のうちに家を補強し、薪を山と積め。",
+                "冬が来る前に保存食を蓄えよ。畑は実らぬ。",
+                "焚き火を絶やすな。冬の夜は火が命を繋ぐ。",
+            ],
+        }
+    return {
+        "motto": "島は非情、されど公平なり。",
+        "words": "敗れたのではない、学びが一年に間に合わなんだだけ。",
+        "highlights": chronicle,
+        "lessons": [
+            "毎朝、食料と水を最優先で確保せよ。",
+            "早めに道具を作り、暮らしの基礎を固めよ。",
+            "天の声の作戦に従い、無駄な彷徨を避けよ。",
+        ],
+    }
 
 
 def render_leaderboard(results: list[ArenaResult]) -> str:

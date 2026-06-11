@@ -15,6 +15,7 @@ How the world works (the sim enforces all of this; read "recent" to see why your
 - "eat"/"cook"/"store" args {"item":"..."} act on things in your inventory.
 - Every action spends action points (ap_left). "sleep" ends the day. Plan around hunger, water, stamina, and sanity.
 - strategy_from_heaven is the watcher's standing order (作戦). The watcher SEES THE TRUE WORLD STATE — your own beliefs may be wrong. The order stays in force day after day until the watcher changes it; weigh it heavily every turn.
+- bouken_no_sho holds lessons written by your PAST SELVES after dying on this island. They paid for them with their lives; weigh them like scripture.
 """
 
 REPAIR_PROMPT = """Your previous answer was not valid action JSON.
@@ -57,13 +58,18 @@ how it ended, days survived, score, the diary trail, "chronicle" (the dated reco
 what actually happened), and — most importantly — "best_lines": the five best 銘言
 the hermit spoke this year (your own words).
 READ the five lines and the chronicle, then return exactly one JSON object:
-{"motto":"<座右の銘 一行>","words":"<辞世あるいは結びの一言>","highlights":["<ハイライト>", ...]}
+{"motto":"<座右の銘 一行>","words":"<辞世あるいは結びの一言>","highlights":["<ハイライト>", ...],"lessons":["<教訓>","<教訓>","<教訓>"]}
 Write IN JAPANESE, 文豪風.
 - motto: ONE engraved line distilled from the five lines and the real ending.
 - words: the hermit's last remark, first person.
 - highlights: 3 to 5 lines looking back at the year FROM THE WATCHER'S VIEW (天の声目線,
   third person, e.g. 「五日目、渇きに膝をつく寸前で井戸の夢を見ていた」). Each line must
   be anchored to a real dated event from the chronicle. No invented events.
+- lessons: EXACTLY 3 short imperative lessons IN JAPANESE for your NEXT life, drawn
+  from THIS chronicle/ending — what you would do differently to survive longer
+  (例:「五日目までに焚き火を建てよ。火は飯と心を守る」「生の魚を食うな」
+  「魚に固執せず木の実を先に拾え」). Each ≤80 chars,命令形. These are written for the
+  hermit who will be born next on this same island; make them concrete and actionable.
 Never use code fences. Never output anything except JSON.
 """
 

@@ -187,8 +187,15 @@ def _motto_schema() -> dict[str, Any]:
                     "maxItems": 5,
                     "items": {"type": "string", "maxLength": 120},
                 },
+                # ぼうけんのしょ: exactly three imperative lessons for the NEXT life.
+                "lessons": {
+                    "type": "array",
+                    "minItems": 3,
+                    "maxItems": 3,
+                    "items": {"type": "string", "maxLength": 80},
+                },
             },
-            "required": ["motto", "words", "highlights"],
+            "required": ["motto", "words", "highlights", "lessons"],
         },
     }
 
@@ -419,10 +426,15 @@ class OpenAICompatibleBrain:
                 highlights = obj.get("highlights") or []
                 if not isinstance(highlights, list):
                     highlights = []
+                lessons = obj.get("lessons") or []
+                if not isinstance(lessons, list):
+                    lessons = []
                 return {
                     "motto": str(obj["motto"]).strip(),
                     "words": str(obj.get("words", "")).strip(),
                     "highlights": [str(h).strip() for h in highlights if str(h).strip()][:5],
+                    # ぼうけんのしょ: the three lessons the next life inherits.
+                    "lessons": [str(s).strip() for s in lessons if str(s).strip()][:3],
                 }
         return None
 

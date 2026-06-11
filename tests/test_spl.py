@@ -739,6 +739,194 @@ class ConditionGateTests(unittest.TestCase):
         self.assertEqual(len(rings), 1)
 
 
+class BoukenNoShoTests(unittest.TestCase):
+    """ぼうけんのしょ — the cross-life lesson journal."""
+
+    def _book(self, tmpdir: str):
+        from spl.agent.bouken import BoukenNoSho
+
+        return BoukenNoSho.load(f"{tmpdir}/bouken_test.json")
+
+    def test_round_trip_append_reload_lives_and_entries(self) -> None:
+        import tempfile
+
+        from spl.agent.bouken import BoukenNoSho
+
+        with tempfile.TemporaryDirectory() as tmp:
+            path = f"{tmp}/bouken_test.json"
+            book = BoukenNoSho.load(path)
+            self.assertEqual(book.lives, 0)
+            book.append({"seed": 42, "days": 5, "score": 100,
+                         "ending": "果てた", "lessons": ["水を掘れ"], "motto": "x"})
+            book.append({"seed": 42, "days": 9, "score": 200,
+                         "ending": "果てた", "lessons": ["火を建てよ"], "motto": "y"})
+            reloaded = BoukenNoSho.load(path)
+            self.assertEqual(reloaded.lives, 2)
+            self.assertEqual(reloaded.entries[0]["life"], 1)
+            self.assertEqual(reloaded.entries[1]["life"], 2)
+            self.assertEqual(reloaded.entries[1]["days"], 9)
+
+    def test_lessons_for_prefers_same_seed_and_dedupes(self) -> None:
+        import tempfile
+
+        from spl.agent.bouken import BoukenNoSho
+
+        with tempfile.TemporaryDirectory() as tmp:
+            book = BoukenNoSho.load(f"{tmp}/bouken_test.json")
+            book.append({"seed": 99, "lessons": ["別の島の教訓"]})
+            book.append({"seed": 42, "lessons": ["水を掘れ", "火を建てよ"]})
+            book.append({"seed": 42, "lessons": ["火を建てよ", "魚を焼け"]})  # dup "火を建てよ"
+            lessons = book.lessons_for(42, limit=6)
+            # same-seed lessons come first, most-recent-first, deduped
+            self.assertEqual(lessons[:3], ["火を建てよ", "魚を焼け", "水を掘れ"])
+            # the other-island lesson appears only after the same-seed ones
+            self.assertIn("別の島の教訓", lessons)
+            self.assertGreater(lessons.index("別の島の教訓"), 0)
+            self.assertEqual(len(lessons), len(set(lessons)))
+
+    def test_fallback_motto_returns_three_lessons_on_each_branch(self) -> None:
+        from spl.arena.leaderboard import fallback_motto
+
+        for seed, days in ((42, 112), (0, 8), (3, 40)):
+            sim = run_local(seed=seed, days=days)
+            motto = fallback_motto(sim)
+            self.assertIn("lessons", motto)
+            self.assertEqual(len(motto["lessons"]), 3,
+                             f"seed {seed} did not yield 3 lessons: {motto['lessons']}")
+            for lesson in motto["lessons"]:
+                self.assertTrue(lesson.strip())
+
+    def test_observation_carries_bouken_no_sho_near_top_when_set(self) -> None:
+        from spl.agent.observer import ObservationBuilder
+
+        sim = Simulation(seed=42, max_days=12)
+        builder = ObservationBuilder()
+        builder.book_lessons = ["水を掘れ", "火を建てよ", "木の実を拾え"]
+        builder.book_lives = 2
+        obs = builder.build(sim)
+        self.assertIn("bouken_no_sho", obs)
+        self.assertEqual(obs["bouken_no_sho"]["lives"], 2)
+        self.assertEqual(obs["bouken_no_sho"]["lessons"][0], "水を掘れ")
+        keys = list(obs.keys())
+        # right after strategy_from_heaven (index 0)
+        self.assertEqual(keys.index("bouken_no_sho"), 1, f"not near top: {keys}")
+
+    def test_observation_omits_bouken_no_sho_when_empty(self) -> None:
+        from spl.agent.observer import ObservationBuilder
+
+        sim = Simulation(seed=42, max_days=12)
+        obs = ObservationBuilder().build(sim)
+        self.assertNotIn("bouken_no_sho", obs)
+
+    def test_motto_schema_requires_three_lessons(self) -> None:
+        from spl.agent.llm_client import _motto_schema
+
+        schema = _motto_schema()["schema"]
+        self.assertIn("lessons", schema["required"])
+        lessons = schema["properties"]["lessons"]
+        self.assertEqual(lessons["minItems"], 3)
+        self.assertEqual(lessons["maxItems"], 3)
+        self.assertEqual(lessons["items"]["maxLength"], 80)
+
+    def test_system_prompt_mentions_bouken_no_sho(self) -> None:
+        from spl.agent.prompts import SYSTEM_PROMPT
+
+        self.assertIn("bouken_no_sho", SYSTEM_PROMPT)
+        self.assertIn("PAST SELVES", SYSTEM_PROMPT)
+
+    def test_pixel_book_records_run_and_replay_reinjects(self) -> None:
+        """The pixel app with --book records the ended run once, and [もう一度]
+        (next life) reloads the book so the new run inherits the lessons."""
+        import os
+        import tempfile
+        from types import SimpleNamespace
+
+        from spl.ui.pixel.app import PixelApp
+
+        with tempfile.TemporaryDirectory() as tmp:
+            old = os.environ.get("SPL_BOOK_DIR")
+            os.environ["SPL_BOOK_DIR"] = tmp
+            try:
+                args = SimpleNamespace(
+                    seed=0, days=5, llm=False, cassette="PxTest", manual=False,
+                    speed=5, scale=2, start_day=0, shots=0, shots_ui=False,
+                    shot_dir="/tmp/spl_test", strategy=None, book=True,
+                )
+                app = PixelApp(args, headless=True)
+                self.assertIsNotNone(app.book)
+                self.assertEqual(app.book.lives, 0)
+                # drive the local burst loop to completion
+                for _ in range(50000):
+                    app._watch_step(app.anim_t + 1e-6)
+                    if app.sim.done:
+                        break
+                self.assertTrue(app.sim.done)
+                # the result-draw path resolves the motto then writes the book once
+                self.assertFalse(app._book_written)
+                app._start_motto()       # local brain resolves the motto synchronously
+                app._maybe_write_book()
+                self.assertTrue(app._book_written)
+                self.assertEqual(app.book.lives, 1)
+                first_entry = app._book_entry
+                self.assertEqual(len(first_entry["lessons"]), 3)
+
+                # [もう一度] = next life: reload + re-inject + reset the guard
+                app._rebuild_sim()
+                self.assertFalse(app._book_written)
+                self.assertEqual(app.book.lives, 1)  # the first life is on file
+            finally:
+                if old is None:
+                    os.environ.pop("SPL_BOOK_DIR", None)
+                else:
+                    os.environ["SPL_BOOK_DIR"] = old
+
+    def test_cli_book_flag_accumulates_lessons_across_lives(self) -> None:
+        """A local --book simulate, run twice on the same seed+cassette, must see
+        the second life inherit the first's lessons (lives=1, lessons injected)."""
+        import os
+        import tempfile
+        from types import SimpleNamespace
+
+        from spl.agent.bouken import book_path_for
+        from spl.ui import cli
+
+        with tempfile.TemporaryDirectory() as tmp:
+            old = os.environ.get("SPL_BOOK_DIR")
+            os.environ["SPL_BOOK_DIR"] = tmp
+            captured: list[dict] = []
+            orig = cli.print_result
+
+            def _spy(sim, motto=None, brain=None, book=None, book_entry=None):
+                captured.append({"book": book, "entry": book_entry})
+
+            cli.print_result = _spy
+            try:
+                args = SimpleNamespace(seed=0, days=5, llm=False, cassette="TestCass",
+                                       strategy=None, tps=0, book=True)
+                # First life: writes life #1 with 3 fallback lessons.
+                cli.run_simulate(args)
+                self.assertEqual(captured[0]["entry"]["life"], 1)
+                self.assertEqual(len(captured[0]["entry"]["lessons"]), 3)
+                # The journal file now exists with one entry.
+                path = book_path_for("TestCass")
+                self.assertTrue(path.exists())
+                # Second life: the book reloaded must report lives=1 going in.
+                cli.run_simulate(args)
+                self.assertEqual(captured[1]["entry"]["life"], 2)
+                # The lessons_for the seed must surface the first life's lessons.
+                from spl.agent.bouken import BoukenNoSho
+
+                book = BoukenNoSho.load(path)
+                self.assertEqual(book.lives, 2)
+                self.assertTrue(book.lessons_for(0))
+            finally:
+                cli.print_result = orig
+                if old is None:
+                    os.environ.pop("SPL_BOOK_DIR", None)
+                else:
+                    os.environ["SPL_BOOK_DIR"] = old
+
+
 if __name__ == "__main__":
     unittest.main()
 
