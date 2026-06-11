@@ -291,7 +291,14 @@ class OpenAICompatibleBrain:
             return
         self._tps_samples.append(completion_tokens / seconds)
 
-    def choose(self, sim: object) -> GameAction:
+    def choose(
+        self, sim: object, extra: list[dict[str, str]] | None = None
+    ) -> GameAction:
+        """Full action-choosing turn with the 思考予算 tiers, repair round and
+        VERIFY pass. ``extra`` messages (e.g. the MAGI 評定 for the day) are
+        appended after the observation, before the model answers, and are carried
+        through every proposal / repair / verify call so the standing counsel
+        steers the whole turn without disturbing the tier machinery."""
         self.calls += 1
         budget = self.current_tier()
         # 内省は満腹の上に立つ: the hermit's condition caps the effective tier.
@@ -309,6 +316,8 @@ class OpenAICompatibleBrain:
             {"role": "system", "content": SYSTEM_PROMPT + "\n" + self.cassette.persona},
             {"role": "user", "content": json.dumps(obs, ensure_ascii=False)},
         ]
+        if extra:
+            messages.extend(extra)
 
         # 1) Generate `candidates` action proposals (sequential calls).
         proposals: list[GameAction] = []
@@ -329,7 +338,7 @@ class OpenAICompatibleBrain:
         # 2) Optional VERIFY pass: a second thought that catches would-be
         #    world-rejects and returns a corrected (or best-of) action.
         if budget.verify and proposals:
-            verified = self._verify(messages, proposals, obs, budget)
+            verified = self._verify(messages, proposals, obs, budget, extra=extra)
             if verified is not None:
                 if not _same_action(verified, proposals[0]):
                     self.verify_corrections += 1
@@ -393,9 +402,12 @@ class OpenAICompatibleBrain:
         proposals: list[GameAction],
         obs: dict[str, Any],
         budget: ThinkingBudget,
+        extra: list[dict[str, str]] | None = None,
     ) -> GameAction | None:
         """One VERIFY call: re-show the observation and the proposal(s) and ask
-        for a corrected / best-valid action under the same JSON contract."""
+        for a corrected / best-valid action under the same JSON contract. Any
+        ``extra`` messages (the day's 評定) are carried so verify weighs the same
+        standing counsel as the proposal calls did."""
         proposal_json = [
             {"action": p.action, "args": p.args, "think": p.think, "say": p.say}
             for p in proposals
@@ -410,6 +422,8 @@ class OpenAICompatibleBrain:
                 ),
             },
         ]
+        if extra:
+            verify_messages.extend(extra)
         try:
             raw = self._chat(
                 verify_messages, schema=_action_schema(budget), max_tokens=budget.max_tokens

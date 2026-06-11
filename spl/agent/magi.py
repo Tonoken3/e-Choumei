@@ -2,25 +2,37 @@ from __future__ import annotations
 
 """MAGI — an Evangelion-style three-seat brain, in two modes.
 
-v2 「操縦」(pilot, default) — 評議と操縦の分離
---------------------------------------------------
+v2.1 「操縦」(pilot, default) — 評議と操縦の分離（最強の脳が操縦桿を握る）
+--------------------------------------------------------------------------
 A live v1 finding: committee-piloting THRASHES. Over 7 in-game days a v1 life
 ran 70 deliberations, reached 0 unanimous rulings, and fumbled 57 times —
-deliberation is excellent for REVIEW but ruinous for CONTROL. v2 splits the two:
+deliberation is excellent for REVIEW but ruinous for CONTROL. v2 split the two,
+but the v2 pilot put the WEAKEST brain (Gemma) on the thinking seat and its
+morning counsel was vague planning (「農作業の日です」) — the hermit died as her
+wheat ripened. Seed-42, unassisted: solo Qwen 13日, v1 committee 13日, v2
+council+Gemwen-pilot only 9日. The 30-day record was solo Qwen under a human
+director whose standing orders were IMPERATIVE DAILY ROUTINES, survival-first.
+
+v2.1 takes that lesson:
 
   * 朝の評定 (morning council): on the first turn of each in-game day the three
-    seats each give SHORT survival counsel (NOT a move — 操縦はGemwenが行う),
-    and one Gemma synthesis call merges them into その日の評定 (≤200 chars). A
-    crisis (water/hunger/hp falling through a floor) reconvenes the council once
-    more that day, replacing the 評定.
-  * 操縦 (piloting): every turn one pilot — the Gemwen relay — flies. Gemma
-    (:8102) reads the observation + the standing 評定 and thinks the next move's
-    aim in two sentences; Qwen (:8011) then emits the schema-forced action with
-    that think + the 評定 appended. Two calls per turn, one hand on the stick.
+    seats each give SHORT survival counsel (NOT a move — 操縦はMELCHIORが行う),
+    and one Gemma (:8102) synthesis call merges them into その日の評定. The 評定
+    is no longer free prose: it must come out as a 命令形の型 (an imperative
+    daily routine) ≤200 chars — ①朝まず水 ②食を得てすぐ食う ③腹と喉が満ちてから
+    建設や畑 ④夕に明日の備え — adapted to today's actual state/危機. RULE:
+    母(BALTHASAR)の生存優先は絶対 — no 評定 may speak business before food/water.
+    A crisis (water/hunger/hp through a floor) reconvenes the council once more
+    that day, replacing the 評定.
+  * 操縦 (piloting): every turn the PILOT is MELCHIOR (Qwen :8011) flying with
+    its OWN full native machinery — thinking-budget tiers, repair round, and the
+    VERIFY pass all intact (the proven 13-day baseline). The day's 評定 is
+    injected as an extra message into MELCHIOR's own choose-path so the council's
+    型 steers without re-litigating every move. The strongest brain holds the
+    stick; the council writes the morning routine.
 
 The 評定 lives on the brain (the human watcher's 作戦 channel stays separate);
-it is injected into BOTH pilot calls all day so the council's counsel steers
-without re-litigating every move.
+it is injected into the pilot's action call all day.
 
 v1 「委員会」(committee) — kept verbatim for comparison/A-B
 ----------------------------------------------------------
@@ -51,6 +63,7 @@ the three and the final Qwen call emits the adopted action. If the Gemma server
 (:8102) is down the council degrades to MELCHIOR-only so the game still runs.
 """
 
+import re
 from pathlib import Path
 from typing import Any
 
@@ -78,11 +91,11 @@ MODERATOR_THINK_PROMPT = (
     "(3)生存に資するか の観点で、どれを採るべきか二、三文で裁定せよ。JSONは書かず、"
     "短い日本語の裁定だけを返せ。"
 )
-# ── v2 pilot-mode prompts ──────────────────────────────────────────────────
+# ── v2.1 pilot-mode prompts ─────────────────────────────────────────────────
 # 朝の評定: each seat gives SHORT survival counsel for the day. The prompt MUST
-# state the role fact — they do NOT pilot; Gemwen flies. The persona lens is
+# state the role fact — they do NOT pilot; MELCHIOR flies. The persona lens is
 # appended per seat. (The marker substring below is asserted in tests/smoke.)
-COUNCIL_ROLE_FACT = "操縦はGemwenが行う。あなたの仕事は操縦ではなく、生存のための評議のみである。"
+COUNCIL_ROLE_FACT = "操縦はMELCHIORが行う。あなたの仕事は操縦ではなく、生存のための評議のみである。"
 _COUNCIL_LENSES = {
     "melchior": "科学者(計画・資源計算)",
     "balthasar": "母(食・水・火・体を最優先)",
@@ -99,17 +112,19 @@ def _council_seat_prompt(seat: str) -> str:
     )
 
 
+# 朝の評定の合成: NOT free prose — the synthesis must emit the day's order as a
+# 命令形の型 (an imperative daily routine). The 母優先 rule is absolute: no 評定
+# may speak business (建設/畑/事業) before food and water are secured.
 COUNCIL_SYNTHESIS_PROMPT = (
     "あなたはMAGIの司会者。三機関(MELCHIOR=科学者/BALTHASAR=母/CASPER=直感)の"
-    "本日の助言が与えられる。操縦士Gemwenが一日それを携えて飛べるよう、三案を"
-    "200字以内の『その日の評定』一文〜数文にまとめよ。具体的な生存行動(いつ・何を)を"
-    "優先し、精神論で曇らせるな。JSONは書かず、評定本文だけを日本語で返せ。"
-)
-
-# 操縦: Gemma thinks the next move's aim in two sentences, given the obs + 評定.
-PILOT_THINK_PROMPT = (
-    "あなたは操縦士Gemwenの思考側。今日の評定を踏まえ、次の一手の狙いを二文で。"
-    "JSONや行動名は書かず、短い日本語の狙いだけを返せ。"
+    "本日の助言と観測が与えられる。操縦士MELCHIORが一日それを携えて飛べるよう、"
+    "本日の命令を次の決まった『型』で、命令形・200字以内にまとめよ:\n"
+    "①朝まず水を確保せよ ②食を得て、得たらすぐ食え ③腹と喉が満ちてから建設や畑に取りかかれ "
+    "④夕に明日の水と食と火の備えをせよ\n"
+    "今日の実際の状態と危機に合わせて各項を具体化せよ(いつ・何を)。精神論で曇らせるな。\n"
+    "RULE: 母(BALTHASAR)の生存優先は絶対である。食と水より先に事業を語る評定を出して"
+    "はならない。(文明点31で餓死した委員会と、麦の実る日に尽きた操縦士の教訓)\n"
+    "JSONは書かず、評定本文(命令形の型)だけを日本語で返せ。"
 )
 
 COMPILE_REVIEW_PROMPT = (
@@ -135,6 +150,32 @@ def _is_poison_article(article: str) -> bool:
     the survival-hostile '飢えを忍べ' / '空腹は忍ぶも' pattern."""
     s = str(article or "")
     return any(n in s for n in _POISON_NEED) and any(b in s for b in _POISON_BEAR)
+
+
+# Qwen3.x leaks raw chain-of-thought into free-text (no-schema) content —
+# "Here's a thinking process:" preambles and <think>…</think> blocks. Left in,
+# they poison the 朝の評定 synthesis (the council reads garbage and writes garbage,
+# even producing non-survival nonsense). Strip them so synthesis sees only the
+# actual Japanese counsel. (Pilot-mode only; the relay machinery is untouched.)
+_THINK_TAG = re.compile(r"<think>.*?</think>", re.DOTALL | re.IGNORECASE)
+
+
+def _clean_counsel(text: str) -> str:
+    """Strip reasoning preambles / think tags from a seat's free-text counsel,
+    keeping the trailing actual advice. Falls back to the last non-empty block."""
+    s = _THINK_TAG.sub("", str(text or "")).strip()
+    # If the text opens with an English CoT preamble (no closing think tag),
+    # keep only the tail from the last blank-line break — the model's real answer
+    # almost always follows its English scratchpad after a blank line.
+    if re.match(r"^\s*(?:here'?s|let me|i need to|okay|first[,\s]|1\.|\*\*)", s, re.IGNORECASE):
+        parts = [p.strip() for p in re.split(r"\n\s*\n", s) if p.strip()]
+        # Prefer the last block that contains Japanese (the answer), else the tail.
+        jp = [p for p in parts if re.search(r"[ぁ-んァ-ヶ一-龠]", p)]
+        if jp:
+            s = jp[-1]
+        elif parts:
+            s = parts[-1]
+    return s.strip()
 
 
 class MagiBrain:
@@ -173,14 +214,13 @@ class MagiBrain:
         self.turn_records: list[dict[str, Any]] = []
         self.degraded_warned = False
 
-        # -- v2 pilot-mode state ------------------------------------------
-        self.counsel: str = ""          # その日の評定 — injected into both pilot calls
+        # -- v2.1 pilot-mode state ----------------------------------------
+        self.counsel: str = ""          # その日の評定(型) — injected into the pilot call
         self._counsel_day: int | None = None   # in-game day the 評定 was set for
         self._crisis_today = False      # crisis re-council already ran today?
         self.councils_held = 0          # number of 朝の評定 sessions
         self.crisis_councils = 0        # number of crisis reconvenes
-        self.pilot_turns = 0            # turns flown by the pilot relay
-        self.last_pilot_think = ""      # most recent pilot think snippet (UI/smoke)
+        self.pilot_turns = 0            # turns flown by MELCHIOR (the pilot)
 
     # -- diarist seam: the runner calls set_diarist(brain) then injects book ---
     # ObservationBuilder carries book_lessons via attributes; the runner sets
@@ -212,7 +252,7 @@ class MagiBrain:
     def status_line(self) -> str:
         if self.mode == "pilot":
             return (
-                f"MAGI操縦 評定{self.councils_held}"
+                f"MAGI v2.1 操縦MELCHIOR 評定{self.councils_held}"
                 f"(臨時{self.crisis_councils}) 手数{self.pilot_turns}"
             )
         return (
@@ -229,7 +269,7 @@ class MagiBrain:
         return self._choose_committee(sim)
 
     # ====================================================================
-    # v2 pilot mode: 朝の評定 → Gemwen relay flies every turn.
+    # v2.1 pilot mode: 朝の評定(型) → MELCHIOR flies every turn (full machinery).
     # ====================================================================
     def _choose_pilot(self, sim: object) -> GameAction:
         self.calls += 1
@@ -237,11 +277,12 @@ class MagiBrain:
         self.tier_history.append(budget.name)
         obs = self.observer.build(sim)
 
-        # The council still needs the Gemma side (think + synthesis). If :8102 is
-        # down, the pilot degrades to Qwen-alone with whatever 評定 is standing.
+        # The council still needs the Gemma side (counsel + synthesis of the 型).
+        # If :8102 is down, the morning council degrades to Qwen, and the pilot
+        # (MELCHIOR) flies on with whatever 評定 is standing.
         gemma_up = self._gemma_alive()
         if not gemma_up and not self.degraded_warned:
-            sim.log("MAGI: 操縦補佐(:8102)応答せず — Qwen単独操縦に縮退")
+            sim.log("MAGI: 評議補佐(:8102)応答せず — Qwen単独で評定を組む縮退に移行")
             self.degraded_warned = True
 
         # 1) Council session bookkeeping: convene on the first turn of a new day,
@@ -255,15 +296,14 @@ class MagiBrain:
             self._crisis_today = True
             self._convene_council(sim, obs, budget, crisis=True, gemma_up=gemma_up)
 
-        # 2) Pilot relay: Gemma thinks the aim, Qwen emits the action — both given
-        #    the standing 評定.
-        action = self._pilot_relay(obs, budget, gemma_up=gemma_up)
+        # 2) Pilot: MELCHIOR (Qwen) flies with its OWN full native machinery —
+        #    思考予算 tiers, repair, verify all intact — with the day's 評定 injected.
+        action = self._pilot(sim)
         self.pilot_turns += 1
         self.turn_records.append({
             "mode": "pilot",
             "day": day,
             "counsel": self.counsel,
-            "think": self.last_pilot_think,
             "final": self._fmt_vote(action),
             "degraded": not gemma_up,
         })
@@ -279,7 +319,7 @@ class MagiBrain:
         user = json.dumps(obs, ensure_ascii=False)
         counsels: dict[str, str] = {}
         # MELCHIOR (Qwen) and CASPER-lens (Qwen) think on :8011; BALTHASAR (Gemma)
-        # on :8102 when up. Each prompt states the role fact (操縦はGemwenが行う).
+        # on :8102 when up. Each prompt states the role fact (操縦はMELCHIORが行う).
         seat_brains = [
             ("melchior", self.melchior),
             ("balthasar", self.balthasar if gemma_up else self.melchior),
@@ -288,9 +328,11 @@ class MagiBrain:
         for seat, brain in seat_brains:
             brain = brain or self.melchior
             try:
-                counsels[seat] = brain.think_freetext(
+                raw = brain.think_freetext(
                     _council_seat_prompt(seat), user, max_tokens=200
-                ).strip()
+                )
+                # Strip leaked reasoning so synthesis reads clean counsel only.
+                counsels[seat] = _clean_counsel(raw)
             except Exception:  # noqa: BLE001
                 counsels[seat] = ""
 
@@ -300,9 +342,9 @@ class MagiBrain:
             {"observation": obs, "councils": counsels}, ensure_ascii=False
         )
         try:
-            counsel = synth_brain.think_freetext(
+            counsel = _clean_counsel(synth_brain.think_freetext(
                 COUNCIL_SYNTHESIS_PROMPT, synth_user, max_tokens=200
-            ).strip()
+            ))
         except Exception:  # noqa: BLE001
             counsel = ""
         if not counsel:
@@ -317,34 +359,21 @@ class MagiBrain:
             self.councils_held += 1
             sim.log(f"MAGI: 朝の評定 — {self.counsel}")
 
-    def _pilot_relay(
-        self, obs: dict, budget: ThinkingBudget, *, gemma_up: bool,
-    ) -> GameAction:
-        """Gemwen relay: Gemma (:8102) thinks the aim given obs + 評定, then Qwen
-        (:8011) emits the schema-forced action with the think + 評定 appended."""
-        import json
-
+    def _pilot(self, sim: object) -> GameAction:
+        """v2.1 pilot: MELCHIOR (Qwen :8011) flies through its OWN choose-path —
+        thinking-budget tiers, repair round, VERIFY pass all intact (the proven
+        13-day baseline) — with the day's 評定 injected as an extra message so the
+        council's morning 型 steers the whole turn. The strongest brain, the stick."""
         counsel = self.counsel or "(評定なし)"
-        # (1) think call to Gemma (falls back to Qwen if Gemma is down).
-        think_brain = self.balthasar if (gemma_up and self.balthasar) else self.melchior
-        think_user = json.dumps(
-            {"observation": obs, "今日の評定": counsel}, ensure_ascii=False
-        )
-        try:
-            think = think_brain.think_freetext(
-                PILOT_THINK_PROMPT, think_user, max_tokens=120
-            ).strip()
-        except Exception:  # noqa: BLE001
-            think = ""
-        self.last_pilot_think = think
-
-        # (2) action call to Qwen with the think + 評定 appended.
+        # The 評定 rides as a USER message after the observation — NOT a system
+        # message: vLLM requires system/developer messages to be consecutive and
+        # at the front, so a trailing system role is a hard 400.
         extra = [{
-            "role": "assistant",
-            "content": f"今日の評定: {counsel}\n操縦士の狙い: {think}",
+            "role": "user",
+            "content": f"今日の評定（評議会より）: {counsel}",
         }]
         try:
-            return self.melchior.propose_action(obs, budget, extra=extra)
+            return self.melchior.choose(sim, extra=extra)
         except (ActionParseError, RuntimeError, Exception):  # noqa: BLE001
             return GameAction(action="rest", args={}, think="(pilot failed)", say="")
 

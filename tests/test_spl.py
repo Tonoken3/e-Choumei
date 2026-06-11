@@ -1100,14 +1100,25 @@ class _FakeSeat:
         self.cassette = Cassette(name="seat", base_url="http://x/v1", persona=persona)
         self._tier_for_tps = tier_for_tps
         self.propose_calls = 0
+        self.choose_calls = 0
         self.think_calls = 0
         self.chat_calls = 0
         self.last_propose_extra = None       # the `extra` messages of the last action call
+        self.last_choose_extra = None        # the `extra` messages of the last choose() call
         self.think_systems: list[str] = []   # system prompts seen by think_freetext
 
     def propose_action(self, obs, budget=None, extra=None):
         self.propose_calls += 1
         self.last_propose_extra = extra
+        if not self._alive:
+            raise RuntimeError("seat down")
+        return self._action
+
+    def choose(self, sim, extra=None):
+        # v2.1 pilot path: MELCHIOR flies through its full choose() machinery
+        # (here scripted), the day's 評定 carried in `extra`.
+        self.choose_calls += 1
+        self.last_choose_extra = extra
         if not self._alive:
             raise RuntimeError("seat down")
         return self._action
@@ -1348,27 +1359,60 @@ class MagiPilotModeTests(unittest.TestCase):
         council.choose(sim)
         self.assertEqual(council.crisis_councils, 1)
 
-    def test_counsel_reaches_the_pilots_messages(self) -> None:
-        # Synthesis call returns this 評定; it must appear in the pilot action's
-        # extra messages (Qwen seat) every turn that day.
+    def test_pilot_flies_through_melchior_choose_with_the_counsel(self) -> None:
+        # v2.1: the pilot is MELCHIOR flying its OWN choose-path; the synthesized
+        # 評定 must ride into that choose() call as an extra message every turn.
         g = GameAction(action="gather", args={}, say="g")
         mel = _FakeSeat(g, think="操縦の狙い")
         bal = _FakeSeat(g, think="その日の評定: 井戸を掘れ")
         council = self._pilot(mel, bal, _FakeSeat(g))
         council.choose(self._sim())
         self.assertTrue(council.counsel)
-        extra = mel.last_propose_extra
+        # The MELCHIOR seat received the action call via choose() (not propose).
+        self.assertEqual(mel.choose_calls, 1)
+        self.assertEqual(mel.propose_calls, 0)
+        # The day's 評定 rode in as an extra message on MELCHIOR's choose.
+        extra = mel.last_choose_extra
         self.assertIsNotNone(extra)
         blob = " ".join(m["content"] for m in extra)
         self.assertIn(council.counsel, blob)
         self.assertIn("今日の評定", blob)
+
+    def test_gemma_seat_gets_no_pilot_think_call(self) -> None:
+        # The weakest brain no longer flies: the Gemma seat is only used for the
+        # morning council counsel + synthesis (2 thinks/day), never to pilot.
+        g = GameAction(action="rest", args={})
+        mel = _FakeSeat(g)
+        bal = _FakeSeat(g)
+        council = self._pilot(mel, bal, _FakeSeat(g))
+        # Three turns, same day → one council; the pilot adds NO think calls.
+        for _ in range(3):
+            council.choose(self._sim())
+        # Gemma (bal) thinks exactly twice: its own counsel + the synthesis. No
+        # per-turn pilot think exists any more, so it stays at 2 across 3 turns.
+        self.assertEqual(bal.think_calls, 2)
+        # MELCHIOR flew all three turns through choose().
+        self.assertEqual(mel.choose_calls, 3)
 
     def test_council_seat_prompt_states_the_role_fact(self) -> None:
         from spl.agent.magi import COUNCIL_ROLE_FACT, _council_seat_prompt
 
         for seat in ("melchior", "balthasar", "casper"):
             self.assertIn(COUNCIL_ROLE_FACT, _council_seat_prompt(seat))
-            self.assertIn("操縦はGemwenが行う", _council_seat_prompt(seat))
+            self.assertIn("操縦はMELCHIORが行う", _council_seat_prompt(seat))
+
+    def test_synthesis_prompt_is_the_survival_first_kata(self) -> None:
+        # 評定 is a 型 (imperative routine) with the absolute 母優先 rule.
+        from spl.agent.magi import COUNCIL_SYNTHESIS_PROMPT
+
+        self.assertIn("母(BALTHASAR)の生存優先は絶対", COUNCIL_SYNTHESIS_PROMPT)
+        self.assertIn("食と水より先に事業を語る評定を出して", COUNCIL_SYNTHESIS_PROMPT)
+        self.assertIn("型", COUNCIL_SYNTHESIS_PROMPT)
+        # The four 型 anchors.
+        self.assertIn("朝まず水", COUNCIL_SYNTHESIS_PROMPT)
+        self.assertIn("得たらすぐ食え", COUNCIL_SYNTHESIS_PROMPT)
+        self.assertIn("腹と喉が満ちてから", COUNCIL_SYNTHESIS_PROMPT)
+        self.assertIn("夕に明日", COUNCIL_SYNTHESIS_PROMPT)
 
     def test_role_fact_reaches_seat_think_calls(self) -> None:
         g = GameAction(action="rest", args={})
@@ -1378,14 +1422,14 @@ class MagiPilotModeTests(unittest.TestCase):
         council.choose(self._sim())
         # The role fact must appear in at least one seat's think system prompt.
         seen = mel.think_systems + bal.think_systems
-        self.assertTrue(any("操縦はGemwenが行う" in s for s in seen))
+        self.assertTrue(any("操縦はMELCHIORが行う" in s for s in seen))
 
     def test_pilot_status_line(self) -> None:
         g = GameAction(action="rest", args={})
         council = self._pilot(_FakeSeat(g), _FakeSeat(g), _FakeSeat(g))
         council.choose(self._sim())
         line = council.status_line()
-        self.assertIn("MAGI操縦", line)
+        self.assertIn("MAGI v2.1 操縦MELCHIOR", line)
         self.assertIn("評定1", line)
         self.assertIn("手数1", line)
 
