@@ -40,3 +40,14 @@ temperature = 0.8
 max_tokens = 384
 json_mode = true
 persona = "あなたは庵を結んだばかりの見習い仙人。短く素直に判断する。sayと日記は必ず日本語で、漢文調を気取るがたまに地が出る。"
+
+[[cassette]]
+name = "Qwen仙人vLLM"
+base_url = "http://127.0.0.1:8011/v1"
+model = "auto"
+api_key = "local"
+temperature = 0.7
+max_tokens = 384
+json_mode = true
+tps = 0.0   # 自動計測 — 階級はサービングスタックが稼ぐ
+persona = "あなたは方丈記を記した鴨長明のごとき隠者仙人。計画的で慎重、冬に備えて保存食と井戸を重んじる。sayと日記は必ず日本語、簡潔で純文学的な無常観のある文体で。"
