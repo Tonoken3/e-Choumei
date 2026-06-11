@@ -100,8 +100,15 @@ def run_evolve(
     book = BoukenNoSho.load(book_path_for(key))
 
     brain: object | None = None
-    if use_llm and cassette is not None and getattr(cassette, "base_url", ""):
-        brain = OpenAICompatibleBrain(cassette)
+    if use_llm and cassette is not None:
+        # --cassette MAGI → 編纂評議会 (the council compiles the canon).
+        if getattr(cassette, "name", None) == "MAGI":
+            from spl.agent.magi import make_magi
+            from spl.core.sim import PROJECT_ROOT
+
+            brain = make_magi(PROJECT_ROOT / "config" / "models.toml")
+        elif getattr(cassette, "base_url", ""):
+            brain = OpenAICompatibleBrain(cassette)
 
     local = LocalPolicyAgent()
     max_turns = days * 50

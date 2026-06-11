@@ -51,3 +51,61 @@ max_tokens = 384
 json_mode = true
 tps = 0.0   # 自動計測 — 階級はサービングスタックが稼ぐ
 persona = "あなたは方丈記を記した鴨長明のごとき隠者仙人。計画的で慎重、冬に備えて保存食と井戸を重んじる。sayと日記は必ず日本語、簡潔で純文学的な無常観のある文体で。"
+
+# ===========================================================================
+# MAGI 合議制 (Evangelion-style 3-seat council). `--cassette MAGI` builds a
+# MagiBrain in code (spl/agent/magi.make_magi) that looks up the three seat
+# cassettes below by name. Each seat is an ordinary OpenAICompatibleBrain.
+#   MELCHIOR = Qwen 科学者  (:8011) — proposes the logical/best-plan move
+#   BALTHASAR = Gemma 母    (:8102) — proposes the survival-first move
+#   CASPER   = Qwemma 直感   — Qwen thinks a short plan → Gemma speaks the move
+#   司会 Gemwen — Gemma thinks the ruling → Qwen speaks the FINAL move (forced)
+# A MAGI run needs BOTH servers up; if :8102 is down the council degrades to
+# MELCHIOR-only (the game must still run).
+# ===========================================================================
+[[cassette]]
+name = "MELCHIOR"
+base_url = "http://127.0.0.1:8011/v1"
+model = "auto"
+api_key = "local"
+temperature = 0.6
+max_tokens = 384
+json_mode = true
+tps = 0.0
+persona = "あなたはMAGIの第一機関MELCHIOR、科学者の人格。論理と計画で最善手を導く。冷静に資源と日数を計算し、根拠のある一手を示せ。sayと日記は必ず日本語。"
+
+[[cassette]]
+name = "BALTHASAR"
+base_url = "http://127.0.0.1:8102/v1"
+model = "auto"
+api_key = "local"
+temperature = 0.6
+max_tokens = 384
+json_mode = true
+tps = 0.0
+persona = "あなたはMAGIの第二機関BALTHASAR、母の人格。まず生存。食と水と火を最優先に、命を繋ぐ一手を選べ。sayと日記は必ず日本語。"
+
+# CASPER は専用サーバを持たず、MELCHIOR(:8011)で思考しBALTHASAR(:8102)で発話する
+# Qwemma リレー。設定上は :8102 を指すが、実体は make_magi が両サーバを束ねる。
+[[cassette]]
+name = "CASPER"
+base_url = "http://127.0.0.1:8102/v1"
+model = "auto"
+api_key = "local"
+temperature = 0.8
+max_tokens = 384
+json_mode = true
+tps = 0.0
+persona = "あなたはMAGIの第三機関CASPER、直感の人格。肌で感じる最善手を、理屈より勘で示せ。sayと日記は必ず日本語。"
+
+# MAGI マーカー: --cassette MAGI で MagiBrain を組む(base_url 空 = 直接の
+# サーバではなく合議制ブレインを在地で構築する目印)。
+[[cassette]]
+name = "MAGI"
+base_url = ""
+model = "magi"
+api_key = "local"
+temperature = 0.6
+max_tokens = 384
+json_mode = true
+persona = "MAGI 合議制 — 三賢人の評議で一手を裁定する。"

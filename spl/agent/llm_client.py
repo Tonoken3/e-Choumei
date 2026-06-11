@@ -336,6 +336,39 @@ class OpenAICompatibleBrain:
                 return verified
         return proposals[0]
 
+    # -- MAGI seams ----------------------------------------------------------
+    # The MAGI council reuses one OpenAICompatibleBrain per seat (sharing all of
+    # the schema / parse / TPS machinery here). These two methods are the minimal
+    # public surface the council drives: one schema-forced action call from a
+    # prebuilt observation, and one free-text "think" call (no schema).
+    def propose_action(
+        self,
+        obs: dict[str, Any],
+        budget: ThinkingBudget | None = None,
+        extra: list[dict[str, str]] | None = None,
+    ) -> GameAction:
+        """One schema-forced action call from an already-built observation,
+        optionally with extra messages (a plan or a moderator ruling) appended
+        before the model answers. Raises ActionParseError on unparseable output."""
+        budget = budget or self.current_tier()
+        messages = [
+            {"role": "system", "content": SYSTEM_PROMPT + "\n" + self.cassette.persona},
+            {"role": "user", "content": json.dumps(obs, ensure_ascii=False)},
+        ]
+        if extra:
+            messages.extend(extra)
+        raw = self._chat(messages, schema=_action_schema(budget), max_tokens=budget.max_tokens)
+        return parse_action_text(raw).to_game_action()
+
+    def think_freetext(self, system: str, user: str, max_tokens: int = 128) -> str:
+        """One free-text (no-schema) call — the 'think' half of a relay. Returns
+        the raw content (think tags and all); callers use it as plan/ruling text."""
+        messages = [
+            {"role": "system", "content": system + "\n" + self.cassette.persona},
+            {"role": "user", "content": user},
+        ]
+        return self._chat(messages, schema=None, max_tokens=max_tokens).strip()
+
     def _propose(self, messages: list[dict[str, str]], budget: ThinkingBudget) -> GameAction:
         """One action proposal, with a repair round when the budget allows it."""
         first = self._chat(messages, schema=_action_schema(budget), max_tokens=budget.max_tokens)

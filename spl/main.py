@@ -150,9 +150,10 @@ def run_evolve(args: object) -> int:
         cassette = Cassette(name=name or "Evolve仙人", base_url="")
     cassette = _apply_tps_override(cassette, args)
     # --llm defaults to True when the cassette has a base_url; --no-llm forces local.
+    # The MAGI council marker has an empty base_url but IS an LLM brain.
     use_llm = args.llm
     if use_llm is None:
-        use_llm = bool(getattr(cassette, "base_url", ""))
+        use_llm = bool(getattr(cassette, "base_url", "")) or getattr(cassette, "name", None) == "MAGI"
 
     return _run_evolve(
         lives=args.lives,

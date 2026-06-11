@@ -212,7 +212,13 @@ def choose_action(sim: Simulation, brain: object | None, local_agent: LocalPolic
 def _make_brain(args: object) -> object | None:
     if not getattr(args, "llm", False):
         return None
-    cassette = find_cassette(PROJECT_ROOT / "config" / "models.toml", getattr(args, "cassette", None))
+    name = getattr(args, "cassette", None)
+    # --cassette MAGI builds the合議制 council (MELCHIOR/BALTHASAR/CASPER) in code.
+    if name == "MAGI":
+        from spl.agent.magi import make_magi
+
+        return make_magi(PROJECT_ROOT / "config" / "models.toml")
+    cassette = find_cassette(PROJECT_ROOT / "config" / "models.toml", name)
     if not cassette.base_url:
         return None
     cassette = _apply_tps_override(cassette, args)

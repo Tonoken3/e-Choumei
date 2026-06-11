@@ -111,6 +111,36 @@ python3 -m spl evolve --lives 4 --seed 0 --days 5 --no-llm             # 局所�
 
 各生の後に `life N: D日 score S ending=… canon_rev=R` と改訂後の5条を逐次表示し（`tail -f` で監視可）、最後に days 一覧・平均・最大・最終家訓を出します。`canon.revision` は何度編纂されたかを表し、`canon.lessons` は常に5条以内です。
 
+## MAGI 合議制（三賢人の評議で一手を裁定する）
+
+一台のモデルに委ねるのではなく、**三つの人格に合議**させて次の一手を決める脳が `--cassette MAGI` です（『エヴァンゲリオン』のMAGIになぞらえた三席評議）。三席はそれぞれ独立したOpenAI互換サーバの仙人脳で、二つのサーバ（Qwen=思考役 / Gemma=発話役）を束ねます。
+
+| 席 | 人格 | サーバ | 役割 |
+|---|---|---|---|
+| **MELCHIOR** | 科学者「論理と計画で最善手を」 | Qwen (`:8011`) | 論理・計画に基づく一手を提案 |
+| **BALTHASAR** | 母「まず生存。食と水と火を最優先に」 | Gemma (`:8102`) | 生存第一の一手を提案 |
+| **CASPER** | 直感「肌で感じる最善手を」 | Qwemma リレー | Qwenが二文の方針を考え→Gemmaが行動を発話 |
+| **司会 Gemwen** | 裁定者 | Gemma思考→Qwen発話 | 三案を「世界のルール・作戦/家訓・生存」で裁定し最終手を確定 |
+
+**一手の流れ**: 三席が各々行動案を出す → **2案以上が一致**すれば多数決ショートカット（司会の思考を省いてQwenが確定・整形、安い） → **三者三様**なら司会GemwenがGemmaで裁定を思考し、Qwenがスキーマ強制の最終行動JSONを発話。Gemmaサーバ（`:8102`）が落ちている時は**MELCHIOR単独の縮退合議**に移行します（ゲームは止めない）。状態表示は `MAGI 合議123 全会一致45 司会裁定78`。
+
+```bash
+# 二つのサーバを上げる（このリグの例: Qwenは既存:8011、GemmaをTP=2でGPU3,4に）
+CUDA_VISIBLE_DEVICES=3,4 NCCL_P2P_DISABLE=1 \
+  vllm serve <SuperGemma4-NVFP4> --tensor-parallel-size 2 --disable-custom-all-reduce \
+  --max-model-len 6144 --gpu-memory-utilization 0.90 --port 8102 --enforce-eager
+# 合議制で観戦 / 編纂
+python3 -m spl pixel    --llm --cassette MAGI            # 三賢人の評議を観る
+python3 -m spl simulate --llm --cassette MAGI --seed 42
+python3 -m spl evolve   --lives 4 --cassette MAGI --book # 編纂評議会で家訓を磨く
+```
+
+`config/models.toml` の `MELCHIOR` / `BALTHASAR` / `CASPER` カセットが各サーバ（`:8011` / `:8102`）を指し、`make_magi()` がコード側で評議脳を組みます。`MAGI` という名のマーカーカセット（`base_url` 空）が `--cassette MAGI` の目印です。
+
+### 編纂評議会（毒の条文を狩る）
+
+家訓の編纂（前節）も `--cassette MAGI` では**評議会**を通ります。**MELCHIOR が改定案を起草** → **BALTHASAR（母）が条文ごとに採用/棄却を理由付きで査読**（子孫の寿命と矛盾を見る）→ Gemwen式の最終編纂でQwenがちょうどEvangelion 5条を発する。母の拒否権は徹底され、**空腹・渇き・寒さを「忍ぶ／耐える／我慢」と美化する毒の条文**は最終稿から削られ、生存に資する具体行動（いつ・何を）へ書き換えられます。これが代々の家訓に紛れ込む「精神論の毒」を殺す仕組みです。
+
 ## 手動で遊ぶ
 
 仙人を自分で操作したい場合:

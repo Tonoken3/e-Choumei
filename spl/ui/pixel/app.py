@@ -456,9 +456,18 @@ class PixelApp:
     def _make_brain(self):
         from spl.agent.llm_client import OpenAICompatibleBrain, find_cassette
 
+        name = getattr(self.args, "cassette", None)
+        # --cassette MAGI builds the合議制 council in code.
+        if name == "MAGI":
+            from spl.agent.magi import make_magi
+
+            try:
+                return make_magi(PROJECT_ROOT / "config" / "models.toml")
+            except Exception:  # noqa: BLE001
+                return None
         try:
             cassette = find_cassette(
-                PROJECT_ROOT / "config" / "models.toml", getattr(self.args, "cassette", None)
+                PROJECT_ROOT / "config" / "models.toml", name
             )
         except Exception:  # noqa: BLE001
             return None

@@ -1086,6 +1086,213 @@ class KakunTests(unittest.TestCase):
                     os.environ["SPL_BOOK_DIR"] = old
 
 
+class _FakeSeat:
+    """A stand-in for OpenAICompatibleBrain: scripted action proposals and a
+    scripted think string, with the 思考予算 / health surface the council uses."""
+
+    def __init__(self, action: GameAction, think: str = "計画", alive: bool = True,
+                 persona: str = "p"):
+        from spl.agent.llm_client import Cassette, tier_for_tps
+
+        self._action = action
+        self._think = think
+        self._alive = alive
+        self.cassette = Cassette(name="seat", base_url="http://x/v1", persona=persona)
+        self._tier_for_tps = tier_for_tps
+        self.propose_calls = 0
+        self.think_calls = 0
+        self.chat_calls = 0
+
+    def propose_action(self, obs, budget=None, extra=None):
+        self.propose_calls += 1
+        if not self._alive:
+            raise RuntimeError("seat down")
+        return self._action
+
+    def think_freetext(self, system, user, max_tokens=128):
+        self.think_calls += 1
+        if not self._alive:
+            raise RuntimeError("seat down")
+        return self._think
+
+    def _resolve_model(self):
+        if not self._alive:
+            raise RuntimeError("down")
+        return "fake"
+
+    def current_tier(self):
+        return self._tier_for_tps(80.0)
+
+    def avg_tps(self):
+        return 80.0
+
+
+class MagiCouncilTests(unittest.TestCase):
+    def _sim(self):
+        return Simulation(seed=42, max_days=112)
+
+    def _council(self, mel, bal, casp=None):
+        from spl.agent.magi import MagiBrain
+
+        return MagiBrain(mel, bal, casp)
+
+    def test_majority_shortcut_picks_the_2_1_winner(self) -> None:
+        gather = GameAction(action="gather", args={}, say="採取")
+        rest = GameAction(action="rest", args={}, say="休む")
+        # MELCHIOR=gather, BALTHASAR=gather, CASPER=rest → 2-1 majority gather.
+        mel = _FakeSeat(gather)
+        bal = _FakeSeat(gather)
+        casp = _FakeSeat(rest)
+        # MELCHIOR's FINAL action call also returns gather (confirms the winner).
+        council = self._council(mel, bal, casp)
+        action = council.choose(self._sim())
+        self.assertEqual(action.action, "gather")
+        rec = council.turn_records[-1]
+        self.assertTrue(rec["agreed"])
+        self.assertFalse(rec["moderator_used"])  # majority skips the 司会 THINK
+        # The 司会 (BALTHASAR/Gemma) think_freetext must NOT have been used as moderator
+        # (only CASPER's MELCHIOR-think may have run).
+        self.assertEqual(bal.think_calls, 0)
+
+    def test_moderator_path_on_three_way_split(self) -> None:
+        a = GameAction(action="gather", args={}, say="a")
+        b = GameAction(action="rest", args={}, say="b")
+        c = GameAction(action="drink", args={}, say="c")
+        mel = _FakeSeat(a)
+        bal = _FakeSeat(b, think="bを採れ")
+        casp = _FakeSeat(c)
+        council = self._council(mel, bal, casp)
+        council.choose(self._sim())
+        rec = council.turn_records[-1]
+        self.assertFalse(rec["agreed"])
+        self.assertTrue(rec["moderator_used"])
+        self.assertEqual(council.moderator_used, 1)
+        # The 司会 ruling came from the Gemma (BALTHASAR) seat's think.
+        self.assertGreaterEqual(bal.think_calls, 1)
+
+    def test_unanimous_counts_and_status_line(self) -> None:
+        g = GameAction(action="gather", args={}, say="g")
+        council = self._council(_FakeSeat(g), _FakeSeat(g), _FakeSeat(g))
+        council.choose(self._sim())
+        rec = council.turn_records[-1]
+        self.assertTrue(rec["unanimous"])
+        self.assertEqual(council.unanimous, 1)
+        self.assertIn("全会一致1", council.status_line())
+
+    def test_degraded_mode_falls_back_to_melchior(self) -> None:
+        g = GameAction(action="gather", args={}, say="g")
+        mel = _FakeSeat(g)
+        bal = _FakeSeat(g, alive=False)  # Gemma down
+        sim = self._sim()
+        council = self._council(mel, bal, _FakeSeat(g))
+        action = council.choose(sim)
+        self.assertEqual(action.action, "gather")
+        rec = council.turn_records[-1]
+        self.assertTrue(rec.get("degraded"))
+        # BALTHASAR/CASPER were never asked for a proposal in degraded mode.
+        self.assertEqual(bal.propose_calls, 0)
+
+    def test_degraded_when_balthasar_is_none(self) -> None:
+        g = GameAction(action="rest", args={}, say="g")
+        council = self._council(_FakeSeat(g), None, None)
+        action = council.choose(self._sim())
+        self.assertEqual(action.action, "rest")
+        self.assertTrue(council.turn_records[-1].get("degraded"))
+
+    def test_compile_council_adopts_at_most_five_articles(self) -> None:
+        # A fake book + seats whose _chat/think emit a 5-article canon.
+        from spl.agent.magi import MagiBrain
+
+        class _FakeBook:
+            canon = ["古き条文"]
+
+            def history_table(self):
+                return [{"life": 1, "days": 90, "lessons": ["水を汲め"]}]
+
+        class _CompileMel(_FakeSeat):
+            def compile_canon(self, book):
+                return ["第一", "第二", "第三", "第四", "第五"]
+
+            def _chat(self, messages, schema=None, max_tokens=None):
+                self.chat_calls += 1
+                import json
+
+                return json.dumps({"lessons": ["改一", "改二", "改三", "改四", "改五"]},
+                                  ensure_ascii=False)
+
+        mel = _CompileMel(GameAction(action="rest", args={}))
+        bal = _FakeSeat(GameAction(action="rest", args={}), think="第三条は毒、棄却")
+        council = MagiBrain(mel, bal, None)
+        articles = council.compile_canon(_FakeBook())
+        self.assertIsNotNone(articles)
+        self.assertLessEqual(len(articles), 5)
+        self.assertEqual(articles, ["改一", "改二", "改三", "改四", "改五"])
+        # BALTHASAR reviewed (the mother's veto ran).
+        self.assertGreaterEqual(bal.think_calls, 1)
+        self.assertEqual(council.last_compile_review, "第三条は毒、棄却")
+
+    def test_poison_article_detector(self) -> None:
+        from spl.agent.magi import _is_poison_article
+
+        self.assertTrue(_is_poison_article("無常の理を深く知る、空腹は忍ぶも、火の温もりを忘れず。"))
+        self.assertTrue(_is_poison_article("飢えを忍べ、春の恵みを待て。"))
+        # 凌ぐ / 癒す / 防ぐ are ACTIONS, not poison.
+        self.assertFalse(_is_poison_article("七日目までに根菜を食え、飢えを凌げ。"))
+        self.assertFalse(_is_poison_article("五日目までに井戸を深く掘れ、渇きを防げ。"))
+
+    def test_compile_council_strips_poison_article_from_draft(self) -> None:
+        from spl.agent.magi import MagiBrain
+
+        poison = "無常の理を深く知る、空腹は忍ぶも、火の温もりを忘れず。"
+
+        class _FakeBook:
+            canon = [poison]
+
+            def history_table(self):
+                return []
+
+        class _CompileMel(_FakeSeat):
+            def compile_canon(self, book):
+                # draft still carries the poison article
+                return ["井戸を掘れ", "根菜を食え", "木の実を拾え", "種を蒔け", poison]
+
+            def _chat(self, messages, schema=None, max_tokens=None):
+                import json
+
+                # the emitter echoes whatever 'canon' it was handed (the clean draft)
+                canon = json.loads(messages[-1]["content"]).get("canon", [])
+                # pad to 5 if short
+                out = (canon + ["火を絶やすな"])[:5]
+                return json.dumps({"lessons": out}, ensure_ascii=False)
+
+        mel = _CompileMel(GameAction(action="rest", args={}))
+        bal = _FakeSeat(GameAction(action="rest", args={}), think="空腹を忍ぶ条は毒、棄却")
+        council = MagiBrain(mel, bal, None)
+        articles = council.compile_canon(_FakeBook())
+        self.assertLessEqual(len(articles), 5)
+        self.assertNotIn(poison, articles)
+        self.assertIn(poison, council.last_poison_stripped)
+
+    def test_compile_council_degrades_to_draft_when_gemma_down(self) -> None:
+        from spl.agent.magi import MagiBrain
+
+        class _FakeBook:
+            canon = []
+
+            def history_table(self):
+                return []
+
+        class _CompileMel(_FakeSeat):
+            def compile_canon(self, book):
+                return ["素案一", "素案二", "素案三", "素案四", "素案五"]
+
+        mel = _CompileMel(GameAction(action="rest", args={}))
+        bal = _FakeSeat(GameAction(action="rest", args={}), alive=False)
+        council = MagiBrain(mel, bal, None)
+        articles = council.compile_canon(_FakeBook())
+        self.assertEqual(articles, ["素案一", "素案二", "素案三", "素案四", "素案五"])
+
+
 if __name__ == "__main__":
     unittest.main()
 
