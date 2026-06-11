@@ -379,8 +379,14 @@ class OpenAICompatibleBrain:
         return self._chat(messages, schema=None, max_tokens=max_tokens).strip()
 
     def _propose(self, messages: list[dict[str, str]], budget: ThinkingBudget) -> GameAction:
-        """One action proposal, with a repair round when the budget allows it."""
-        first = self._chat(messages, schema=_action_schema(budget), max_tokens=budget.max_tokens)
+        """One action proposal, with a repair round when the budget allows it.
+
+        max_tokens honours the cassette's declared breathing space when it
+        exceeds the tier budget: long-reasoning models (hidden reasoning_content
+        before any JSON) suffocate under small caps; their real cost is paid in
+        wall-clock time, which the TPS measurement keeps honest."""
+        cap = max(budget.max_tokens, self.cassette.max_tokens)
+        first = self._chat(messages, schema=_action_schema(budget), max_tokens=cap)
         try:
             return parse_action_text(first).to_game_action()
         except ActionParseError as exc:
@@ -392,7 +398,7 @@ class OpenAICompatibleBrain:
                 {"role": "user", "content": REPAIR_PROMPT + f"\nError: {exc}"},
             ]
             repaired = self._chat(
-                repair_messages, schema=_action_schema(budget), max_tokens=budget.max_tokens
+                repair_messages, schema=_action_schema(budget), max_tokens=cap
             )
             return parse_action_text(repaired).to_game_action()
 
