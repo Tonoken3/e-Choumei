@@ -48,7 +48,7 @@ def _run_one(
 
 def run_local_arena(seeds: list[int], days: int) -> str:
     """The bundled local brain across many seeds (a fixed-world difficulty sweep)."""
-    results = [_run_one(seed, days, "Local勇者", lambda: None, False) for seed in seeds]
+    results = [_run_one(seed, days, "Local仙人", lambda: None, False) for seed in seeds]
     return render_leaderboard(results)
 
 

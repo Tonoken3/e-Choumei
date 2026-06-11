@@ -11,7 +11,7 @@ from typing import Any
 from spl.core.actions import ACTION_WORDS, GameAction
 
 from .observer import ObservationBuilder
-from .prompts import DIARY_PROMPT, REPAIR_PROMPT, SYSTEM_PROMPT
+from .prompts import DIARY_PROMPT, MOTTO_PROMPT, REPAIR_PROMPT, SYSTEM_PROMPT
 from .schema import (
     ActionParseError,
     _iter_balanced_objects,
@@ -82,6 +82,22 @@ def _action_schema() -> dict[str, Any]:
                 "say": {"type": "string", "maxLength": 160},
             },
             "required": ["think", "action", "args", "say"],
+        },
+    }
+
+
+def _motto_schema() -> dict[str, Any]:
+    return {
+        "name": "hermit_motto",
+        "strict": True,
+        "schema": {
+            "type": "object",
+            "additionalProperties": False,
+            "properties": {
+                "motto": {"type": "string", "maxLength": 90},
+                "words": {"type": "string", "maxLength": 160},
+            },
+            "required": ["motto", "words"],
         },
     }
 
@@ -164,6 +180,41 @@ class OpenAICompatibleBrain:
                 return str(obj["diary"]).strip() or None
         cleaned = raw.strip("`").strip()
         return cleaned or None
+
+    def write_motto(self, sim: object) -> dict[str, str] | None:
+        """After the year ends, the hermit reads their own five best 銘言 and
+        distills a 座右の銘 — the final result screen's crown."""
+        from spl.arena.leaderboard import select_meigen
+
+        hero = sim.hero
+        context = {
+            "ending": sim.result_reason or ("survived" if sim.completed else "fell"),
+            "completed": bool(sim.completed),
+            "days_survived": hero.days_survived,
+            "score": sim.score(),
+            "confusions": hero.confusion_count,
+            "final_stats": {"hp": hero.hp, "hunger": hero.hunger, "water": hero.water, "sanity": hero.sanity},
+            "best_lines": select_meigen(hero.spoken_lines, 5),
+            "diary_tail": [entry.text for entry in sim.memory.diary[-4:]],
+        }
+        messages = [
+            {"role": "system", "content": MOTTO_PROMPT + "\n" + self.cassette.persona},
+            {"role": "user", "content": json.dumps(context, ensure_ascii=False)},
+        ]
+        raw = self._chat(messages, schema=_motto_schema(), max_tokens=512).strip()
+        if not raw:
+            return None
+        for candidate in _iter_balanced_objects(raw):
+            try:
+                obj = json.loads(_remove_trailing_commas(candidate))
+            except json.JSONDecodeError:
+                continue
+            if isinstance(obj, dict) and obj.get("motto"):
+                return {
+                    "motto": str(obj["motto"]).strip(),
+                    "words": str(obj.get("words", "")).strip(),
+                }
+        return None
 
     def _resolve_model(self) -> str:
         if self._model:

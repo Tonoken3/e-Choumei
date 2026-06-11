@@ -646,7 +646,8 @@ class Overlays:
         surf.blit(foot, (x, rect.bottom - foot.get_height() - lay.px(6)))
         return send
 
-    def draw_result(self, surf, sim, lay: Layout, hover: str = ""):
+    def draw_result(self, surf, sim, lay: Layout, hover: str = "",
+                    motto: dict | None = None, motto_pending: bool = False):
         """End-of-run panel. Returns {"again": rect, "quit": rect} in window
         coords so the app can hit-test the [もう一度] / [終了] buttons."""
         pg = self.pg
@@ -655,6 +656,24 @@ class Overlays:
         hero = sim.hero
         x = rect.x + lay.px(10)
         y = rect.y + f.big.get_height() + lay.px(10)
+        # The crown of the run: the hermit's own 座右の銘, distilled from the
+        # year's five best lines (LLM-written when a brain played).
+        if motto_pending and not motto:
+            slab = _render(f.body, f.jp("いま、座右の銘を綴っている……", "Writing the final motto..."), pal.UI_TEXT_DIM)
+            surf.blit(slab, (x, y))
+            y += f.body.get_height() + lay.px(8)
+        elif motto:
+            for wln in _wrap(f"座右の銘 「{motto.get('motto', '')}」", 44, 2):
+                slab = _render(f.big, f.jp(wln, wln), pal.UI_GOLD)
+                surf.blit(slab, (x, y))
+                y += f.big.get_height() + lay.px(2)
+            words = motto.get("words", "")
+            if words:
+                for wln in _wrap(words, 56, 2):
+                    slab = _render(f.body, wln, pal.UI_TEXT)
+                    surf.blit(slab, (x + lay.px(6), y))
+                    y += f.body.get_height() + lay.px(2)
+            y += lay.px(8)
         info = [
             sim.result_reason or (f.jp("生存中。", "Still alive.") if hero.alive
                                   else f.jp("英雄は倒れた。", "The hero fell.")),
@@ -663,7 +682,7 @@ class Overlays:
             f"{f.jp('混乱', 'Confusions')}: {hero.confusion_count}",
             f"{f.jp('文明点', 'Civ pts')}: {hero.civilization_points()}",
             "",
-            f.jp("迷言ベスト5:", "Best lines:"),
+            f.jp("銘言ベスト5:", "Best lines:"),
         ]
         lh = f.body.get_height() + lay.px(3)
         for ln in info:

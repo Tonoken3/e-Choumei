@@ -8,7 +8,7 @@ import time
 from spl.agent.llm_client import OpenAICompatibleBrain, find_cassette
 from spl.agent.observer import ObservationBuilder
 from spl.agent.policy import LocalPolicyAgent
-from spl.arena.leaderboard import select_meigen
+from spl.arena.leaderboard import fallback_motto, select_meigen
 from spl.core.actions import GameAction
 from spl.core.crops import FOOD_VALUES
 from spl.core.sim import PROJECT_ROOT, Simulation
@@ -83,8 +83,19 @@ def run_play(args: object) -> int:
         sim.result_reason = "Stopped by max turn guard."
     if not args.no_clear:
         _clear()
-    print_result(sim)
+    print_result(sim, motto=_final_motto(sim, brain if args.llm else None))
     return 0 if sim.completed else 1
+
+
+def _final_motto(sim: Simulation, brain: object | None) -> dict[str, str]:
+    if brain is not None and sim.done:
+        try:
+            motto = brain.write_motto(sim)
+            if motto:
+                return motto
+        except Exception:  # noqa: BLE001 - the ending must never crash
+            pass
+    return fallback_motto(sim)
 
 
 def run_simulate(args: object) -> int:
@@ -101,7 +112,7 @@ def run_simulate(args: object) -> int:
         turns += 1
     if turns >= max_turns and not sim.done:
         sim.result_reason = "Stopped by max turn guard."
-    print_result(sim)
+    print_result(sim, motto=_final_motto(sim, brain if args.llm else None))
     print(f"Turns: {turns}")
     if turns >= max_turns and not sim.done:
         print("Stopped by max turn guard.")
@@ -176,7 +187,7 @@ def parse_manual_command(line: str) -> GameAction:
 
 def print_frame(sim: Simulation, observer: ObservationBuilder, radius: int | None = 7) -> None:
     hero = sim.hero
-    print("SPL: Self-sufficient Hero")
+    print("SPL 『自給自足仙人 e:鴨長明』")
     print("=" * 72)
     print(sim.status_line())
     print(f"Score {sim.score()} | Confusion {hero.confusion_count} | Seed {sim.seed}")
@@ -213,9 +224,14 @@ def print_diary(sim: Simulation) -> None:
         print("-" * 40)
 
 
-def print_result(sim: Simulation) -> None:
+def print_result(sim: Simulation, motto: dict[str, str] | None = None) -> None:
     print("SPL Result")
     print("=" * 72)
+    motto = motto or fallback_motto(sim)
+    print(f"座右の銘: 「{motto['motto']}」")
+    if motto.get("words"):
+        print(f"結びの言葉: {motto['words']}")
+    print("-" * 72)
     print(sim.result_reason or ("Still alive." if sim.hero.alive else "The hero fell."))
     print(sim.status_line())
     print(f"Score: {sim.score()}")
@@ -228,7 +244,7 @@ def print_result(sim: Simulation) -> None:
         if amount > 0:
             print(f"  {item}: {amount}")
     print()
-    print("迷言ベスト5 (best lines):")
+    print("銘言ベスト5:")
     best = select_meigen(sim.hero.spoken_lines, 5)
     if best:
         for line in best:

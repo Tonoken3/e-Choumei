@@ -16,16 +16,16 @@ from .world import SEASON_NAMES, WEATHER_NAMES, World
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 
 # The "混乱" voice (spec §4.3): a small pool of disoriented lines so a confused
-# hero — the lovable, struggling small model — does not repeat one stock line.
+# hermit — the lovable, struggling small model — does not repeat one stock line.
 CONFUSION_LINES = (
-    "Where am I? The island has too many edges.",
-    "Wait... which way was the sea?",
-    "My hands forgot what they were holding.",
-    "The map in my head went quiet.",
-    "Was I going somewhere? The thought slipped away.",
-    "Too many edges. I cannot find the next step.",
-    "I blink, and the plan is gone.",
-    "The wind said something. I did not catch it.",
+    "ここは……どこじゃ……？",
+    "我は誰ぞ。庵はいずこ。",
+    "思案が、風に攫われてしもうた。",
+    "ゆく河の流れは絶えずして……はて、何の話であったか。",
+    "月がふたつ見える。いや、ひとつか。",
+    "道を忘れた。道のほうも、我を忘れたらしい。",
+    "手に何を持っておったか、手に聞いても答えぬ。",
+    "波の音が、右からも左からも聞こえる。",
 )
 
 

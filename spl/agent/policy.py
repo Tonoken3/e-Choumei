@@ -359,30 +359,31 @@ class LocalPolicyAgent:
     def _act(self, action: str, think: str, **args: object) -> GameAction:
         return GameAction(action=action, args=args, think=think, say=self._line_for(action))
 
-    # A few lines per action, so the hero's voice — the 迷言 (memorable-quote)
-    # supply the spec sells — does not collapse into one filler string. The
+    # A few lines per action, so the hermit's voice — the 銘言 (engraved-saying)
+    # supply this game sells — does not collapse into one filler string. The
     # variant is picked from the day (pure, no RNG), keeping determinism intact.
+    # The register is 方丈記-adjacent: a reclusive literary hermit, 鴨長明 style.
     _LINES: dict[str, tuple[str, ...]] = {
-        "till": ("The soil opens like a slow promise.", "Break the ground; ask it for a future.", "A field is just patience with edges."),
-        "plant": ("Small seeds, long bets.", "I bury a little hope in the dirt.", "Grow slowly, but please grow."),
-        "water": ("Grow, please. I am asking politely.", "A drink for you before one for me.", "Rain by hand is still rain."),
-        "harvest": ("The soil answered.", "Payday, measured in leaves.", "What I planted, I now carry."),
-        "chop": ("Wood now, warmth later.", "The forest lends; I will remember.", "Each swing is a wall I do not yet have."),
-        "mine": ("Stone is just slow money.", "The rock gives grudgingly, but it gives.", "Dust on my hands, plans in my head."),
-        "fish": ("If the sea has mercy, dinner has fins.", "Patience, baited.", "The water keeps its secrets and sometimes a meal."),
-        "forage": ("The island hides snacks in strange places.", "Eyes down, hopes up.", "Whatever the island spares, I will take."),
-        "craft": ("Hands, remember what the mind promised.", "A tool is a wish made of wood.", "Build the thing that builds the rest."),
-        "build": ("One more piece of civilization.", "Today I out-stubborn the weather.", "Walls are arguments against winter."),
-        "cook": ("Fire makes the difference between food and risk.", "A warm meal is a small victory.", "Better cooked than brave."),
-        "eat": ("Fuel first, glory later.", "The body votes, and it votes for lunch.", "Quiet the stomach; free the mind."),
-        "drink": ("A well-timed sip is a strategy.", "Water is the cheapest courage.", "Thirst loses to a steady hand."),
-        "store": ("A full shelf is a calmer night.", "Save now, eat in the snow.", "Winter, I am getting ready for you."),
-        "trade_accept": ("A fair swap is two people winning.", "Someone else's surplus, my survival.", "Trade turns scraps into plans."),
-        "trade_decline": ("Not today, friend.", "I will keep what I have, thank you.", "A polite no is still a no."),
-        "move": ("One foot, then the other.", "The island is wide; my legs are willing.", "Going to where the work is."),
-        "rest": ("Even the stubborn must breathe.", "Rest is not surrender.", "I gather myself before the dark."),
-        "write_diary": ("One line between me and the dark.", "If I write it down, the day was real.", "Ink is cheaper than forgetting."),
-        "sleep": ("Tomorrow can carry the rest.", "I bank the day and close my eyes.", "Enough. The island will wait."),
+        "till": ("土を返せば、土もまた我に返すなり。", "鍬の先で、明日という字を書く。", "大地は黙して、よく応ふ。"),
+        "plant": ("一粒の種に、百日の夢を託す。", "埋めしは種か、それとも願いか。", "芽吹けよと、祈るほかに業はなし。"),
+        "water": ("乾く土に、一掬の慈悲を。", "雨の代わりを、我が手が務める。", "水は低きへ、恵みは根へ。"),
+        "harvest": ("土の返事を、両の手に受く。", "実りとは、待つことの別の名なり。", "百日の祈り、今日ひと籠となる。"),
+        "chop": ("森に借りて、冬に返す。", "一振りごとに、壁がひとつ近づく。", "木は倒れて薪となり、我を温める。"),
+        "mine": ("石は黙して語らず、されど家を支ふ。", "岩を穿つは、急がぬ心なり。", "砕けた石に、明日の竈を見る。"),
+        "fish": ("糸を垂れて、心も垂れる。", "魚信なくとも、波の音は釣れた。", "竿の先に、無常の引きを待つ。"),
+        "forage": ("島の隅々に、小さき施しあり。", "足元の恵みを、見落とさぬように。", "拾うは木の実か、生きる理由か。"),
+        "craft": ("手が覚えし業は、心より正直なり。", "道具とは、願いの形なり。", "作る物が、作る者を作る。"),
+        "build": ("庵いまだ成らず、されど志は成れり。", "柱一本、嵐への返歌とする。", "雨をしのぐ工夫の数を、文明と呼ぶ。"),
+        "cook": ("火を通すは、命への礼儀。", "湯気の向こうに、束の間の極楽。", "煮炊きの煙は、独りの宴。"),
+        "eat": ("腹が満ちて、初めて月も愛でられる。", "一椀の飯、千金に値す。", "食うて生きる。それより他に道はなし。"),
+        "drink": ("ゆく河の流れを、一口だけ拝借す。", "喉が潤えば、思案もまた潤う。", "水の味を知る者は、渇きを知る者なり。"),
+        "store": ("樽に詰めるは、冬への文。", "蓄えとは、未来の己への施しなり。", "雪の日の我よ、これで凌いでくれ。"),
+        "trade_accept": ("人の声は、薬にも勝る。", "余り物と余り物、出会えば宝。", "商人もまた、ゆく河の流れのひとつ。"),
+        "trade_decline": ("足るを知れば、欲しき物なし。", "今日は縁なきものとて。", "持たぬこともまた、豊かさのうち。"),
+        "move": ("歩めば、島もまた歩む。", "行く先はあれど、急ぐ理由はなし。", "一歩一歩が、庵への道。"),
+        "rest": ("休むもまた、業のうち。", "風と同じ速さで、息をする。", "焦らぬ心には、嵐もまた静か。"),
+        "write_diary": ("書き残さねば、今日は無かったことになる。", "筆の先に、心の澱を預ける。", "言の葉一枚、闇に灯すあかり。"),
+        "sleep": ("今日を畳んで、枕とする。", "明日のことは、明日の我に任す。", "夢の中までは、畑も追って来まい。"),
     }
 
     def _line_for(self, action: str) -> str:

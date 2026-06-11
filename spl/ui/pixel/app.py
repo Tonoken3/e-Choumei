@@ -193,6 +193,8 @@ class PixelApp:
             self.sim.set_diarist(self.brain)
         else:
             self.llm_enabled = False
+        self._motto: dict | None = None
+        self._motto_busy = False
         self._pending_action: GameAction | None = None
         self._thread_busy = False
         self._thread_lock = threading.Lock()
@@ -331,6 +333,8 @@ class PixelApp:
         )
         if self.brain is not None:
             self.sim.set_diarist(self.brain)
+        self._motto = None
+        self._motto_busy = False
         self._recompute_offsets()
         self._terrain = None
         self._terrain_sig = None
@@ -1088,11 +1092,40 @@ class PixelApp:
         if self._bubble_text and now < self._bubble_until:
             self.hud.draw_speech(window, self._bubble_text, anchor, self.lay)
 
+    def _start_motto(self) -> None:
+        """Fetch the final 座右の銘: the LLM hermit writes its own (off-thread,
+        reading its five best lines); local runs get the deterministic one."""
+        from spl.arena.leaderboard import fallback_motto
+
+        if self.brain is None:
+            self._motto = fallback_motto(self.sim)
+            return
+        self._motto_busy = True
+
+        def work() -> None:
+            from spl.arena.leaderboard import fallback_motto as fb
+
+            try:
+                motto = self.brain.write_motto(self.sim) or fb(self.sim)
+            except Exception:  # noqa: BLE001 - the ending must never crash
+                motto = fb(self.sim)
+            self._motto = motto
+            self._motto_busy = False
+
+        import threading
+
+        threading.Thread(target=work, daemon=True).start()
+
     def _draw_overlay(self, window) -> None:
         lay = self.lay
         if self.sim.done:
+            if self._motto is None and not self._motto_busy:
+                self._start_motto()
             hover = self._result_hover()
-            self._hits["result"] = self.overlays.draw_result(window, self.sim, lay, hover)
+            self._hits["result"] = self.overlays.draw_result(
+                window, self.sim, lay, hover,
+                motto=self._motto, motto_pending=self._motto_busy,
+            )
             return
         if self.overlay == "help":
             self.overlays.draw_help(window, lay)
@@ -1170,7 +1203,7 @@ class PixelApp:
     def run_window(self) -> int:
         pg = self.pg
         pg.init()
-        pg.display.set_caption("SPL — Island Diorama (voxel)")
+        pg.display.set_caption("自給自足仙人 e:鴨長明 — SPL")
         window = pg.display.set_mode((self.lay.win_w, self.lay.win_h), pg.RESIZABLE)
         clock = pg.time.Clock()
         deadline = time.time() + float(getattr(self.args, "_smoke_seconds", 0) or 0)

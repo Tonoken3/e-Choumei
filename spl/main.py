@@ -7,7 +7,7 @@ from spl.ui.cli import run_play, run_simulate
 
 
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(prog="spl", description="SPL: Self-sufficient Hero")
+    parser = argparse.ArgumentParser(prog="spl", description="SPL 『自給自足仙人 e:鴨長明』")
     sub = parser.add_subparsers(dest="command")
 
     play = sub.add_parser("play", help="watch or manually play the terminal game")
@@ -27,7 +27,7 @@ def build_parser() -> argparse.ArgumentParser:
     pixel.add_argument("--seed", type=int, default=42)
     pixel.add_argument("--days", type=int, default=112)
     pixel.add_argument("--llm", action="store_true", help="let an OpenAI-compatible cassette play")
-    pixel.add_argument("--cassette", default="Qwen勇者", help="cassette name from config/models.toml")
+    pixel.add_argument("--cassette", default="Qwen仙人", help="cassette name from config/models.toml")
     pixel.add_argument("--manual", action="store_true", help="control the hero manually")
     pixel.add_argument("--speed", type=int, default=2, choices=(1, 2, 3), help="watch speed: 1 slow / 2 normal / 3 fast")
     pixel.add_argument("--scale", type=int, default=0, choices=(0, 1, 2, 3),
@@ -59,7 +59,7 @@ def _add_common(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--days", type=int, default=112)
     parser.add_argument("--llm", action="store_true", help="use OpenAI-compatible cassette when possible")
-    parser.add_argument("--cassette", default="Qwen勇者", help="cassette name from config/models.toml")
+    parser.add_argument("--cassette", default="Qwen仙人", help="cassette name from config/models.toml")
 
 
 def run_pixel(args: object) -> int:
