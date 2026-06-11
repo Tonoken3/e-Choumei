@@ -467,7 +467,7 @@ class Overlays:
             y += lh
         y += lay.px(6)
         surf.blit(_render(f.body,
-                          f.jp("行灯のような小さな島。英雄が生き延びるのを見守る。",
+                          f.jp("行灯のような小さな島。仙人が生き延びるのを見守る。",
                                "A small lamplit island. Watch the hero try to survive."),
                           pal.UI_GOLD), (x, y))
         foot = _render(f.label, f.jp("外側クリック / Space / H で閉じる",
@@ -737,43 +737,52 @@ class Overlays:
         x = rect.x + lay.px(12)
         y = rect.y + lay.px(6)
 
+        # The button row owns the bottom of the strip; every text line must stay
+        # above it. Wrapping is measured in real glyph pixels (JP labels are wide),
+        # not a guessed character count — the old guess overflowed narrow windows.
+        btn_h = f.body.get_height() + lay.px(10)
+        by = rect.bottom - btn_h - lay.px(8)
+        char_w = max(1, f.label.size("あ")[0])
+        cols = max(20, (rect.width - lay.px(40)) // char_w)
+        line_h = f.label.get_height() + lay.px(1)
+
+        def emit(text: str, color, indent: int = 0) -> bool:
+            nonlocal y
+            if y + line_h > by - lay.px(4):
+                return False
+            surf.blit(_render(f.label, text, color), (x + indent, y))
+            y += line_h
+            return True
+
         title = _render(f.big, f.jp(f"承認 — {sim.world.day}日目の朝", f"Approve - morning of day {sim.world.day}"),
                         pal.UI_GOLD)
         surf.blit(title, (x, y))
         y += title.get_height() + lay.px(4)
 
         # current stats line
-        surf.blit(_render(f.label, sim.status_line()[:110], pal.UI_TEXT), (x, y))
-        y += f.label.get_height() + lay.px(4)
+        for ln in _wrap(sim.status_line(), cols, 1):
+            emit(ln, pal.UI_TEXT)
+        y += lay.px(3)
 
-        # last night's diary entry (most recent)
-        surf.blit(_render(f.label, f.jp("昨夜の日記:", "Last night's diary:"), pal.UI_TEXT_DIM), (x, y))
-        y += f.label.get_height() + lay.px(2)
+        # the standing 作戦 — the pit wall's most important line, so it renders
+        # BEFORE the diary and survives clamping on small windows.
+        advice = getattr(sim, "advice_from_heaven", None)
+        if advice:
+            for ln in _wrap(f.jp(f"作戦:「{advice}」", f"Order: \"{advice}\""), cols, 2):
+                emit(ln, pal.UI_GOLD_DIM)
+        else:
+            emit(f.jp("作戦なし", "(no standing order)"), pal.UI_TEXT_DIM)
+        y += lay.px(3)
+
+        # last night's diary entry (most recent) — fills whatever space remains.
+        emit(f.jp("昨夜の日記:", "Last night's diary:"), pal.UI_TEXT_DIM)
         entries = sim.memory.diary
         if entries:
             raw = entries[-1].text.replace("\n", " ")
-            for ln in _wrap(raw, 90, 3):
-                surf.blit(_render(f.label, ln, pal.UI_TEXT), (x + lay.px(6), y))
-                y += f.label.get_height() + lay.px(1)
+            for ln in _wrap(raw, cols - 2, 3):
+                emit(ln, pal.UI_TEXT, indent=lay.px(6))
         else:
-            surf.blit(_render(f.label, f.jp("（まだ日記はない）", "(no diary yet)"), pal.UI_TEXT_DIM),
-                      (x + lay.px(6), y))
-            y += f.label.get_height() + lay.px(1)
-        y += lay.px(4)
-
-        # the standing 作戦
-        advice = getattr(sim, "advice_from_heaven", None)
-        if advice:
-            for ln in _wrap(f.jp(f"作戦:「{advice}」", f"Order: \"{advice}\""), 90, 2):
-                surf.blit(_render(f.label, ln, pal.UI_GOLD_DIM), (x, y))
-                y += f.label.get_height() + lay.px(1)
-        else:
-            surf.blit(_render(f.label, f.jp("作戦なし", "(no standing order)"), pal.UI_TEXT_DIM), (x, y))
-            y += f.label.get_height() + lay.px(1)
-
-        # buttons along the bottom of the strip
-        btn_h = f.body.get_height() + lay.px(10)
-        by = rect.bottom - btn_h - lay.px(8)
+            emit(f.jp("（まだ日記はない）", "(no diary yet)"), pal.UI_TEXT_DIM, indent=lay.px(6))
         nxt = pg.Rect(x, by, lay.px(200), btn_h)
         edit = pg.Rect(nxt.right + lay.px(12), by, lay.px(200), btn_h)
         for b, label in ((nxt, f.jp("次の日へ（Enter）", "Next day (Enter)")),
@@ -816,7 +825,7 @@ class Overlays:
         changes = getattr(sim, "strategy_changes", 0)
         info = [
             sim.result_reason or (f.jp("生存中。", "Still alive.") if hero.alive
-                                  else f.jp("英雄は倒れた。", "The hero fell.")),
+                                  else f.jp("仙人は果てた。", "The hermit fell.")),
             f"{f.jp('得点', 'Score')}: {sim.score()}",
             f"{f.jp('生存日数', 'Days')}: {hero.days_survived}",
             (f"{f.jp('混乱', 'Confusions')}: {hero.confusion_count}    "
@@ -837,7 +846,7 @@ class Overlays:
             y += lh
         best = select_meigen(hero.spoken_lines, 5)
         if not best:
-            best = [f.jp("(英雄は黙したまま)", "(the hero kept quiet)")]
+            best = [f.jp("(仙人は黙したまま)", "(the hermit kept quiet)")]
         qlh = f.label.get_height() + lay.px(2)
         for line in best:
             for wln in _wrap(f'"{line}"', 60, 2):
