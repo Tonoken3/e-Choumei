@@ -125,6 +125,9 @@ class ObservationBuilder:
             screams.append("体が壊れかけている。飲み、食い、休め。計画は後だ。")
         if hero.sanity <= 20:
             screams.append("心が千切れそうだ。火のそばで休め。")
+        # 寒けりゃ震える: winter bites every night until the walls are built.
+        if sim.world.season == "winter" and not hero.has("house_upgrade"):
+            screams.append("寒さに体が震えて止まらぬ。火と壁が要る。家を固めよ。")
         return screams
 
     def _alerts(self, sim: object) -> list[str]:
