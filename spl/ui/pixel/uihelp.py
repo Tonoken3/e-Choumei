@@ -262,6 +262,65 @@ def build_tile_menu(fonts, sim, pos: Position) -> list[MenuItem]:
     return items
 
 
+# --- 作戦 (standing-order) suggestions --------------------------------------
+# Map the ObservationBuilder alert strings (English, stable keys) to a sensible
+# Japanese standing directive the watcher can issue with one click. The watcher
+# sees the true world state, so each directive is phrased as a strategy the
+# hermit should keep following until it changes.
+ALERT_TO_DIRECTIVE = {
+    "Hunger is low": "食料を最優先。釣りと採集で today の食を確保せよ",
+    "Water is low": "水を切らすな。水辺へ向かい、井戸を建てて渇きを断て",
+    "Stamina is low": "無理をするな。家で休み、体力を取り戻してから動け",
+    "Sanity is fraying": "心を保て。焚き火を絶やさず、休息を挟みながら進め",
+    "Harvest ready": "実った作物をまず収穫し、食と備えに回せ",
+    "Crops need water": "畑の水やりを怠るな。乾く前に水を運べ",
+    "Crops need water twice today": "干天じゃ。畑に二度水をやり、作物を枯らすな",
+    "Autumn: build storage for winter": "秋のうちに保存樽を建て、冬の食を蓄えよ",
+    "Winter: crops do not grow": "冬は畑を頼るな。蓄えと釣りで食いつなげ",
+    "Merchant is here": "商人と賢く取引し、足りぬ物を補え",
+}
+
+# Weather hazards share one stem; keyed on the alert prefix.
+_HAZARD_DIRECTIVE = {
+    "storm": "嵐に備えよ。家にこもり、無駄に外を出歩くな",
+    "drought": "干天じゃ。水を蓄え、畑への水やりを二倍にせよ",
+    "snow": "雪じゃ。暖を取り、体力を温存して凌げ",
+}
+
+# Generic standing orders shown when there are no alerts to convert.
+_GENERIC_DIRECTIVES = (
+    "井戸と保存樽を最優先。水と食の基盤を固めよ",
+    "毎日まず食と水を確保し、余力で文明を築け",
+    "無駄な空振りを避け、確実に実る行動を選べ",
+)
+
+
+def strategy_suggestions(fonts, alerts: list[str], limit: int = 3) -> list[str]:
+    """Up to ``limit`` one-click 作戦 directives derived from the live
+    observation alerts (mouse-only ergonomics). Falls back to generic standing
+    orders when there are no actionable alerts. Deterministic."""
+    out: list[str] = []
+    for alert in alerts:
+        directive: str | None = None
+        if alert.startswith("Harvest ready"):
+            directive = ALERT_TO_DIRECTIVE["Harvest ready"]
+        elif alert.startswith("Weather hazard:"):
+            kind = alert.split(":", 1)[1].strip()
+            directive = _HAZARD_DIRECTIVE.get(kind)
+        else:
+            directive = ALERT_TO_DIRECTIVE.get(alert)
+        if directive and directive not in out:
+            out.append(directive)
+        if len(out) >= limit:
+            return out
+    for generic in _GENERIC_DIRECTIVES:
+        if len(out) >= limit:
+            break
+        if generic not in out:
+            out.append(generic)
+    return out[:limit]
+
+
 def build_trade_menu(fonts, sim) -> list[MenuItem]:
     offer = sim.current_offer
     items: list[MenuItem] = []

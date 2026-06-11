@@ -24,6 +24,10 @@ class ObservationBuilder:
             current = f"Field({crop.name}:{'ready' if plot.ready else str(plot.days_left) + 'd'})"
         alerts = self._alerts(sim)
         return {
+            # The watcher's standing order (作戦). Placed at the TOP on purpose:
+            # the watcher SEES THE TRUE WORLD STATE, so this outranks the hermit's
+            # own (possibly wrong) beliefs. Persists day after day until changed.
+            "strategy_from_heaven": sim.advice_from_heaven,
             "day": world.day,
             "season": SEASON_NAMES[world.season],
             "weather": WEATHER_NAMES[world.weather],
@@ -44,7 +48,6 @@ class ObservationBuilder:
             "inventory": hero.inventory_summary(),
             "alerts": alerts,
             "trade_offer": sim.current_offer.describe() if sim.current_offer else None,
-            "advice_from_heaven": sim.advice_from_heaven,
             "memory": sim.memory.recent_context(days=4),
         }
 

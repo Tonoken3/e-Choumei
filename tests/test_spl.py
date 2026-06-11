@@ -457,6 +457,213 @@ class PixelVoxelTests(unittest.TestCase):
         self.assertIs(app._ensure_terrain(), slab, "pan should not rebuild terrain")
 
 
+class SakusenTests(unittest.TestCase):
+    """作戦 (standing order) + 承認制/最速 speed ladder — the F1 pit-wall layer."""
+
+    # -- core seam: set_strategy / strategy_changes / observation --------------
+    def test_set_strategy_persists_and_counts_only_real_changes(self) -> None:
+        sim = Simulation(seed=42, max_days=12)
+        self.assertEqual(sim.strategy_changes, 0)
+        self.assertIsNone(sim.advice_from_heaven)
+
+        sim.set_strategy("水と食を最優先")
+        self.assertEqual(sim.advice_from_heaven, "水と食を最優先")
+        self.assertEqual(sim.strategy_changes, 1)
+
+        # re-sending the same order does not inflate the counter
+        sim.set_strategy("水と食を最優先")
+        self.assertEqual(sim.strategy_changes, 1)
+
+        # a genuinely different order counts
+        sim.set_strategy("井戸を掘れ")
+        self.assertEqual(sim.strategy_changes, 2)
+
+        # clearing does not count, and empty/whitespace clears
+        sim.set_strategy(None)
+        self.assertIsNone(sim.advice_from_heaven)
+        self.assertEqual(sim.strategy_changes, 2)
+        sim.set_strategy("   ")
+        self.assertIsNone(sim.advice_from_heaven)
+        self.assertEqual(sim.strategy_changes, 2)
+
+    def test_strategy_persists_across_the_day_night_cycle(self) -> None:
+        # The order must survive a full day/night — nothing clears it.
+        sim = Simulation(seed=42, max_days=12)
+        sim.set_strategy("毎日まず水を確保せよ")
+        agent = LocalPolicyAgent()
+        start = sim.world.day
+        for _ in range(400):
+            if sim.world.day != start or sim.done:
+                break
+            sim.step(agent.choose(sim))
+        self.assertNotEqual(sim.world.day, start, "did not cross a day boundary")
+        self.assertEqual(sim.advice_from_heaven, "毎日まず水を確保せよ")
+
+    def test_observation_carries_strategy_from_heaven_near_top(self) -> None:
+        from spl.agent.observer import ObservationBuilder
+
+        sim = Simulation(seed=42, max_days=12)
+        sim.set_strategy("井戸と保存樽を最優先")
+        obs = ObservationBuilder().build(sim)
+        self.assertEqual(obs["strategy_from_heaven"], "井戸と保存樽を最優先")
+        # the old key must be gone; the renamed key must be near the top
+        self.assertNotIn("advice_from_heaven", obs)
+        keys = list(obs.keys())
+        self.assertLessEqual(keys.index("strategy_from_heaven"), 1,
+                             f"strategy_from_heaven not near top: {keys}")
+
+    def test_system_prompt_mentions_strategy_from_heaven(self) -> None:
+        from spl.agent.prompts import SYSTEM_PROMPT
+
+        self.assertIn("strategy_from_heaven", SYSTEM_PROMPT)
+        self.assertIn("TRUE WORLD STATE", SYSTEM_PROMPT)
+
+    def test_cli_strategy_flag_wires_into_the_sim(self) -> None:
+        from types import SimpleNamespace
+
+        from spl.ui import cli
+
+        # run_simulate with --strategy must seed the standing order before play.
+        args = SimpleNamespace(
+            seed=42, days=8, llm=False, cassette=None, radius=7,
+            strategy="水を切らすな", tps=0,
+        )
+        captured: dict[str, object] = {}
+        orig = cli.print_result
+
+        def _spy(sim, motto=None, **kw):  # noqa: ANN001
+            captured["advice"] = sim.advice_from_heaven
+            captured["changes"] = sim.strategy_changes
+
+        cli.print_result = _spy
+        try:
+            cli.run_simulate(args)
+        finally:
+            cli.print_result = orig
+        self.assertEqual(captured["advice"], "水を切らすな")
+        self.assertEqual(captured["changes"], 1)
+
+    # -- pixel: 承認制 / 最速 ----------------------------------------------------
+    def _watch_app(self, speed: int = 3, strategy=None, days: int = 12):
+        from types import SimpleNamespace
+
+        from spl.ui.pixel.app import PixelApp
+
+        args = SimpleNamespace(
+            seed=42, days=days, llm=False, cassette="x", manual=False, speed=speed,
+            scale=2, start_day=0, shots=0, shots_ui=False, shot_dir="/tmp/spl_test",
+            strategy=strategy,
+        )
+        return PixelApp(args, headless=True)
+
+    def test_strategy_flag_seeds_pixel_app(self) -> None:
+        app = self._watch_app(strategy="井戸を最優先")
+        self.assertEqual(app.sim.advice_from_heaven, "井戸を最優先")
+        self.assertEqual(app.sim.strategy_changes, 1)
+
+    def _run_watch(self, app, frames: int) -> bool:
+        """Drive the watch loop with a steadily advancing fake clock (so the
+        per-speed delay gate keeps opening). Stops when approval latches."""
+        for i in range(frames):
+            app._watch_step(app.anim_t + i * 0.5)
+            if app.approval_pause or app.sim.done:
+                return app.approval_pause
+        return app.approval_pause
+
+    def test_approval_mode_pauses_at_day_boundary_and_next_advances_one_day(self) -> None:
+        app = self._watch_app(speed=1)  # 承認
+        self.assertFalse(app.approval_pause)
+        start_day = app.sim.world.day
+        # step the watch loop until the boundary latches the pause
+        self.assertTrue(self._run_watch(app, 3000), "承認 mode never paused at a boundary")
+        paused_day = app.sim.world.day
+        self.assertEqual(paused_day, start_day + 1)
+
+        # while paused the sim must not advance — _update holds at the boundary
+        for i in range(50):
+            app._update(1 / 60.0, app.anim_t + (3000 + i) * 0.5)
+        self.assertEqual(app.sim.world.day, paused_day)
+        self.assertTrue(app.approval_pause)
+
+        # [次の日へ] resumes; run until it pauses again — exactly one more day
+        app._resume_next_day()
+        self.assertFalse(app.approval_pause)
+        self.assertTrue(self._run_watch(app, 3000))
+        self.assertEqual(app.sim.world.day, paused_day + 1)
+
+    def test_fastest_reaches_done_without_exceptions_and_faster_than_normal(self) -> None:
+        # 最速 (speed 5): zero delay, multiple steps/frame -> reaches sim.done.
+        # The fake clock barely advances, proving the burst loop (not the clock)
+        # drives progress at 最速.
+        fast = self._watch_app(speed=5, days=12)
+        frames_fast = 0
+        for _ in range(50000):
+            fast._watch_step(fast.anim_t + frames_fast * 1e-6)
+            frames_fast += 1
+            if fast.sim.done:
+                break
+        self.assertTrue(fast.sim.done, "最速 did not reach sim.done")
+
+        # 普 (speed 3) takes exactly one step per opened delay window, so it needs
+        # far more frames to cover the same span — the fair, deterministic measure.
+        norm = self._watch_app(speed=3, days=12)
+        frames_norm = 0
+        for _ in range(50000):
+            norm._watch_step(norm.anim_t + frames_norm * 0.5)
+            frames_norm += 1
+            if norm.sim.done:
+                break
+        self.assertTrue(norm.sim.done)
+        self.assertLess(frames_fast, frames_norm,
+                        f"最速 should need fewer frames ({frames_fast}) than 普 ({frames_norm})")
+
+    def test_result_panel_renders_with_strategy_stats(self) -> None:
+        app = self._watch_app(speed=5, strategy="井戸と保存樽を最優先", days=12)
+        for i in range(50000):
+            app._watch_step(app.anim_t + i * 1e-6)
+            if app.sim.done:
+                break
+        self.assertTrue(app.sim.done)
+        # draw the result panel; strategy stats must render without raising
+        win = app.pg.Surface((app.lay.win_w, app.lay.win_h))
+        app.overlays.draw_result(win, app.sim, app.lay)
+        self.assertGreaterEqual(app.sim.strategy_changes, 1)
+
+    def test_strategy_overlay_clear_and_send_route_through_set_strategy(self) -> None:
+        app = self._watch_app(speed=3)
+        # open the 作戦 overlay and render it so the hit rects exist
+        app.overlay = "heaven"
+        app.heaven_text = "水を最優先"
+        win = app.pg.Surface((app.lay.win_w, app.lay.win_h))
+        app.render(win)
+        send = app._hits.get("heaven_send")
+        self.assertIsNotNone(send)
+        app._click_overlay(send.centerx, send.centery)
+        self.assertEqual(app.sim.advice_from_heaven, "水を最優先")
+        self.assertEqual(app.sim.strategy_changes, 1)
+
+        # now clear it via [作戦解除]
+        app.overlay = "heaven"
+        app.render(win)
+        clear = app._hits.get("heaven_clear")
+        self.assertIsNotNone(clear)
+        app._click_overlay(clear.centerx, clear.centery)
+        self.assertIsNone(app.sim.advice_from_heaven)
+        # clearing does not inflate the change counter
+        self.assertEqual(app.sim.strategy_changes, 1)
+
+    def test_pitwall_strip_renders_and_next_button_resumes(self) -> None:
+        app = self._watch_app(speed=1)
+        self.assertTrue(self._run_watch(app, 3000))
+        win = app.pg.Surface((app.lay.win_w, app.lay.win_h))
+        app.render(win)  # draws the pit-wall strip, populating hit rects
+        hits = app._hits.get("pitwall")
+        self.assertTrue(hits and "next" in hits)
+        nxt = hits["next"]
+        app._click_pitwall(nxt.centerx, nxt.centery)
+        self.assertFalse(app.approval_pause, "[次の日へ] did not resume")
+
+
 if __name__ == "__main__":
     unittest.main()
 

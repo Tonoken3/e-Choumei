@@ -70,7 +70,13 @@ class Simulation:
         self.day_log: list[str] = []
         self.full_log: list[str] = []
         self.current_offer: MerchantOffer | None = None
+        # The watcher's standing strategy (作戦 / DQの「さくせん」, F1のピットウォール指示).
+        # Deliberately PERSISTENT: nothing in the day/night cycle clears it — once
+        # set it is inherited every day until the watcher changes or lifts it.
         self.advice_from_heaven: str | None = None
+        # How many times a *new, non-empty, different* directive was issued. Lets
+        # the 戦績 tell an unassisted run (0回) from a directed one.
+        self.strategy_changes: int = 0
         self.completed = False
         self.failed = False
         self.result_reason = ""
@@ -198,6 +204,19 @@ class Simulation:
             f"{WEATHER_NAMES[world.weather]} AP {hero.ap_left}/{self.ap_per_day} | "
             f"HP {hero.hp} Hu {hero.hunger} Wa {hero.water} St {hero.stamina} Sa {hero.sanity}"
         )
+
+    def set_strategy(self, text: str | None) -> None:
+        """Set (or clear) the standing 作戦. Strips ``text``; an empty/None value
+        clears the directive. ``strategy_changes`` counts only a genuinely new
+        directive — a non-empty string different from the one already standing —
+        so re-sending the same line, or clearing, never inflates the count.
+
+        The directive itself is never auto-cleared by the day/night cycle: it
+        persists until the watcher changes it (DQの「さくせん」/F1の監督指示)."""
+        cleaned = (text or "").strip() or None
+        if cleaned is not None and cleaned != self.advice_from_heaven:
+            self.strategy_changes += 1
+        self.advice_from_heaven = cleaned
 
     def set_diarist(self, diarist: object | None) -> None:
         self.diarist = diarist

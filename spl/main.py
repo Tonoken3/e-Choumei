@@ -17,10 +17,12 @@ def build_parser() -> argparse.ArgumentParser:
     play.add_argument("--radius", type=int, default=7, help="map view radius")
     play.add_argument("--no-clear", action="store_true", help="do not clear the terminal each frame")
     play.add_argument("--heaven", action="store_true", help="ask for one daily advice line in watch mode")
+    play.add_argument("--strategy", default=None, help="set the initial standing 作戦 (天の声) before the run")
     play.set_defaults(func=run_play)
 
     simulate = sub.add_parser("simulate", help="run a fast non-interactive simulation")
     _add_common(simulate)
+    simulate.add_argument("--strategy", default=None, help="set the initial standing 作戦 (天の声) before the run")
     simulate.set_defaults(func=run_simulate)
 
     pixel = sub.add_parser("pixel", help="play/watch in the isometric pixel-art window (needs pygame)")
@@ -35,7 +37,9 @@ def build_parser() -> argparse.ArgumentParser:
         help="思考予算: force a constant tokens/sec (0=auto-measure)",
     )
     pixel.add_argument("--manual", action="store_true", help="control the hero manually")
-    pixel.add_argument("--speed", type=int, default=2, choices=(1, 2, 3), help="watch speed: 1 slow / 2 normal / 3 fast")
+    pixel.add_argument("--speed", type=int, default=3, choices=(1, 2, 3, 4, 5),
+                       help="watch speed: 1 承認 / 2 遅 / 3 普 / 4 速 / 5 最速")
+    pixel.add_argument("--strategy", default=None, help="set the initial standing 作戦 (天の声) before the run")
     pixel.add_argument("--scale", type=int, default=0, choices=(0, 1, 2, 3),
                        help="window preset: 0=auto (Full HD if desktop allows, else 90%% of desktop), "
                             "1=small 1280x720, 2=fhd 1920x1080, 3=large 2560x1440")

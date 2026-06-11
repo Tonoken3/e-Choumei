@@ -340,6 +340,10 @@ class Hud:
             surf.blit(_render(f.label, line[:78], pal.UI_TEXT_DIM), (rx, ry))
             ry += f.label.get_height() + lay.px(1)
 
+        # The active 作戦 (standing order) banner lives in the top guide strip
+        # (always visible in watch mode) — see PixelApp._strategy_banner — so it
+        # is not repeated here to keep this panel from crowding the score line.
+
         # Score line: anchored to the bottom of the panel in the legible num font.
         food = sum(FOOD_VALUES[i] * a for i, a in hero.inventory.items() if i in FOOD_VALUES)
         score_line = (
@@ -432,8 +436,8 @@ class Overlays:
                  "- Click a tile -> action menu (move, harvest, till, ...)"),
             f.jp("・タイルにカーソルを乗せると 名前・作物・距離 が出る",
                  "- Hover a tile to see its name, crop and distance"),
-            f.jp("・下のボタン: 一時停止 / 速度 / 観戦⇔手動 / 日記 / 作る / 食べる / 天の声",
-                 "- Buttons below: pause / speed / mode / diary / craft / eat / heaven"),
+            f.jp("・下のボタン: 一時停止 / 速度 / 観戦⇔手動 / 日記 / 作る / 食べる / 作戦",
+                 "- Buttons below: pause / speed / mode / diary / craft / eat / strategy"),
             f.jp("・「ここへ移動」を選ぶと自動で歩く（クリックで中断）",
                  "- 'Walk here' auto-walks there (click to interrupt)"),
         ]
@@ -445,9 +449,9 @@ class Overlays:
             f.jp("移動: 矢印/WASD   E: その場の行動   O: 食べる",
                  "Move: arrows/WASD   E: context action   O: eat"),
             "X/V/Q/R/Z: " + f.jp("木/採掘/水/休/寝", "chop/mine/drink/rest/sleep") +
-            "    C/D/T: " + f.jp("作る/日記/天の声", "craft/diary/heaven"),
-            "1/2/3: " + f.jp("速度", "speed") + "    M: " +
-            f.jp("観戦⇔手動", "watch<->manual") + "    H: " + f.jp("ヘルプ", "help"),
+            "    C/D/T: " + f.jp("作る/日記/作戦", "craft/diary/strategy"),
+            "1〜5: " + f.jp("速度(承認/遅/普/速/最速)", "speed (approve/slow/nrm/fast/max)") +
+            "    M: " + f.jp("観戦⇔手動", "watch<->manual") + "    H: " + f.jp("ヘルプ", "help"),
             f.jp("ホイール/＋－: 寄る・引く   F: 仙人を追従   右ドラッグ: 視点移動",
                  "Wheel/+-: zoom   F: follow the hermit   right-drag: pan"),
         ]
@@ -620,39 +624,166 @@ class Overlays:
             y += row_h
         return hits
 
-    def draw_heaven(self, surf, text: str, lay: Layout, send_hover: bool = False):
-        """Heaven's-voice text entry. Returns the [送る] button rect (window
-        coords) so the app can hit-test clicks (Enter still confirms)."""
+    def draw_heaven(self, surf, text: str, lay: Layout, current: str | None = None,
+                    suggestions: list[str] | None = None,
+                    mouse: tuple[int, int] | None = None):
+        """The 作戦 (standing-order) editor — evolved from the old heaven overlay.
+
+        Shows the current standing 作戦 (wrapped), a single-line text box to
+        replace it, [送る]/[作戦解除] buttons, and up to 3 one-click suggestion
+        rows derived from the live alerts. Returns a hit dict::
+
+            {"send": rect, "clear": rect, "suggestions": [(rect, directive), ...]}
+
+        in window coords so the app can dispatch clicks. Enter still confirms,
+        CTRL+V pastes (the app handles those keys)."""
         pg = self.pg
         f = self.f
-        rect = self._panel(surf, f.jp("天の声を入力", "Heaven's Voice"), lay)
+        suggestions = suggestions or []
+        mx, my = mouse if mouse else (-1, -1)
+
+        def _hot(r) -> bool:
+            return r.collidepoint(mx, my)
+
+        rect = self._panel(surf, f.jp("作戦を授ける（天の声）", "Standing Order (Heaven's Voice)"), lay)
         x = rect.x + lay.px(10)
+        y = rect.y + f.big.get_height() + lay.px(10)
+
+        # current standing 作戦 (wrapped), or 作戦なし.
+        head = _render(f.body, f.jp("いまの作戦:", "Current order:"), pal.UI_TEXT_DIM)
+        surf.blit(head, (x, y))
+        y += head.get_height() + lay.px(3)
+        if current:
+            for ln in _wrap(f"「{current}」", 40, 3):
+                surf.blit(_render(f.body, ln, pal.UI_GOLD), (x + lay.px(6), y))
+                y += f.body.get_height() + lay.px(2)
+        else:
+            surf.blit(_render(f.body, f.jp("作戦なし", "(no standing order)"), pal.UI_TEXT_DIM),
+                      (x + lay.px(6), y))
+            y += f.body.get_height() + lay.px(2)
+        y += lay.px(8)
+
+        # instruction + text box
         surf.blit(
             _render(f.body,
-                    f.jp("英雄に届く一言を授ける。Enter か [送る] で送信。",
-                         "Whisper one line of guidance. Enter or [Send]."),
+                    f.jp("新しい作戦を入力（Enter か [送る]、CTRL+Vで貼り付け）",
+                         "Type a new order (Enter or [Send]; CTRL+V to paste)"),
                     pal.UI_TEXT_DIM),
-            (x, rect.y + f.big.get_height() + lay.px(10)),
+            (x, y),
         )
-        box_y = rect.y + f.big.get_height() + lay.px(14) + f.body.get_height() + lay.px(8)
+        y += f.body.get_height() + lay.px(6)
         box_h = f.body.get_height() + lay.px(8)
-        box = pg.Rect(x, box_y, rect.width - lay.px(20), box_h)
+        box = pg.Rect(x, y, rect.width - lay.px(20), box_h)
         pg.draw.rect(surf, pal.UI_PANEL_LIGHT, box)
         pg.draw.rect(surf, pal.UI_BORDER, box, max(1, lay.px(2)))
         surf.blit(_render(f.body, text + "_", pal.UI_TEXT), (box.x + lay.px(4), box.y + lay.px(3)))
-        # [送る] button
-        send_w = lay.px(84)
-        send_h = f.body.get_height() + lay.px(10)
-        send = pg.Rect(x, box.bottom + lay.px(8), send_w, send_h)
+
+        # [送る] / [作戦解除] buttons
+        btn_h = f.body.get_height() + lay.px(10)
         rad = lay.px(3)
-        pg.draw.rect(surf, pal.UI_PANEL_LIGHT if send_hover else pal.UI_PANEL, send, border_radius=rad)
-        pg.draw.rect(surf, pal.UI_GOLD if send_hover else pal.UI_BORDER, send,
-                     max(1, lay.px(2)), border_radius=rad)
-        slab = _render(f.body, f.jp("送る", "Send"), pal.UI_TEXT)
-        surf.blit(slab, (send.centerx - slab.get_width() // 2, send.centery - slab.get_height() // 2))
-        foot = _render(f.label, f.jp("Esc で閉じる", "Esc to close"), pal.UI_TEXT_DIM)
+        send = pg.Rect(x, box.bottom + lay.px(8), lay.px(96), btn_h)
+        clear = pg.Rect(send.right + lay.px(10), send.y, lay.px(120), btn_h)
+        for b, label in ((send, f.jp("送る", "Send")), (clear, f.jp("作戦解除", "Clear order"))):
+            hot = _hot(b)
+            pg.draw.rect(surf, pal.UI_PANEL_LIGHT if hot else pal.UI_PANEL, b, border_radius=rad)
+            pg.draw.rect(surf, pal.UI_GOLD if hot else pal.UI_BORDER, b, max(1, lay.px(2)), border_radius=rad)
+            slab = _render(f.body, label, pal.UI_TEXT)
+            surf.blit(slab, (b.centerx - slab.get_width() // 2, b.centery - slab.get_height() // 2))
+
+        # one-click suggestion rows (mouse-only ergonomics)
+        sug_hits: list[tuple[object, str]] = []
+        y = clear.bottom + lay.px(12)
+        if suggestions:
+            surf.blit(_render(f.body, f.jp("おすすめの作戦（クリックで即適用）:",
+                                           "Suggested orders (click to apply):"), pal.UI_TEXT),
+                      (x, y))
+            y += f.body.get_height() + lay.px(5)
+            row_h = f.body.get_height() + lay.px(8)
+            for directive in suggestions[:3]:
+                row = pg.Rect(x, y, rect.width - lay.px(20), row_h)
+                hot = _hot(row)
+                if hot:
+                    pg.draw.rect(surf, pal.UI_PANEL_LIGHT, row, border_radius=lay.px(2))
+                label = "・" + directive
+                for ln in _wrap(label, 44, 1):
+                    surf.blit(_render(f.body, ln, pal.UI_GOLD if hot else pal.UI_TEXT),
+                              (row.x + lay.px(6), row.y + lay.px(3)))
+                sug_hits.append((row, directive))
+                y += row_h + lay.px(2)
+
+        foot = _render(f.label, f.jp("Esc で閉じる（作戦は変えるまで毎日引き継がれる）",
+                                     "Esc to close (the order persists daily until changed)"),
+                       pal.UI_TEXT_DIM)
         surf.blit(foot, (x, rect.bottom - foot.get_height() - lay.px(6)))
-        return send
+        return {"send": send, "clear": clear, "suggestions": sug_hits}
+
+    def draw_pitwall(self, surf, sim, lay: Layout, mouse: tuple[int, int] | None = None):
+        """承認制 pit-wall: a compact bottom-third strip shown at a day boundary.
+        Shows last night's diary, the current stats line, the standing 作戦, and
+        [次の日へ] / [作戦を変える] buttons. Mouse-first; Enter = 次の日へ. Returns
+        {"next": rect, "edit": rect} in window coords. Deliberately covers only
+        the bottom third so the island stays visible above it."""
+        pg = self.pg
+        f = self.f
+        mx, my = mouse if mouse else (-1, -1)
+        panel_h = max(lay.px(150), lay.map_rect.height // 3)
+        top = lay.map_rect.bottom - panel_h
+        rect = pg.Rect(lay.px(6), top, lay.win_w - lay.px(12), panel_h - lay.px(4))
+        dim = pg.Surface((rect.width, rect.height), pg.SRCALPHA)
+        dim.fill((14, 12, 22, 232))
+        surf.blit(dim, (rect.x, rect.y))
+        rad = lay.px(4)
+        pg.draw.rect(surf, pal.UI_GOLD, rect, max(1, lay.px(2)), border_radius=rad)
+        x = rect.x + lay.px(12)
+        y = rect.y + lay.px(6)
+
+        title = _render(f.big, f.jp(f"承認 — {sim.world.day}日目の朝", f"Approve - morning of day {sim.world.day}"),
+                        pal.UI_GOLD)
+        surf.blit(title, (x, y))
+        y += title.get_height() + lay.px(4)
+
+        # current stats line
+        surf.blit(_render(f.label, sim.status_line()[:110], pal.UI_TEXT), (x, y))
+        y += f.label.get_height() + lay.px(4)
+
+        # last night's diary entry (most recent)
+        surf.blit(_render(f.label, f.jp("昨夜の日記:", "Last night's diary:"), pal.UI_TEXT_DIM), (x, y))
+        y += f.label.get_height() + lay.px(2)
+        entries = sim.memory.diary
+        if entries:
+            raw = entries[-1].text.replace("\n", " ")
+            for ln in _wrap(raw, 90, 3):
+                surf.blit(_render(f.label, ln, pal.UI_TEXT), (x + lay.px(6), y))
+                y += f.label.get_height() + lay.px(1)
+        else:
+            surf.blit(_render(f.label, f.jp("（まだ日記はない）", "(no diary yet)"), pal.UI_TEXT_DIM),
+                      (x + lay.px(6), y))
+            y += f.label.get_height() + lay.px(1)
+        y += lay.px(4)
+
+        # the standing 作戦
+        advice = getattr(sim, "advice_from_heaven", None)
+        if advice:
+            for ln in _wrap(f.jp(f"作戦:「{advice}」", f"Order: \"{advice}\""), 90, 2):
+                surf.blit(_render(f.label, ln, pal.UI_GOLD_DIM), (x, y))
+                y += f.label.get_height() + lay.px(1)
+        else:
+            surf.blit(_render(f.label, f.jp("作戦なし", "(no standing order)"), pal.UI_TEXT_DIM), (x, y))
+            y += f.label.get_height() + lay.px(1)
+
+        # buttons along the bottom of the strip
+        btn_h = f.body.get_height() + lay.px(10)
+        by = rect.bottom - btn_h - lay.px(8)
+        nxt = pg.Rect(x, by, lay.px(200), btn_h)
+        edit = pg.Rect(nxt.right + lay.px(12), by, lay.px(200), btn_h)
+        for b, label in ((nxt, f.jp("次の日へ（Enter）", "Next day (Enter)")),
+                         (edit, f.jp("作戦を変える", "Change order"))):
+            hot = b.collidepoint(mx, my)
+            pg.draw.rect(surf, pal.UI_PANEL_LIGHT if hot else pal.UI_PANEL, b, border_radius=lay.px(3))
+            pg.draw.rect(surf, pal.UI_GOLD if hot else pal.UI_BORDER, b, max(1, lay.px(2)), border_radius=lay.px(3))
+            slab = _render(f.body, label, pal.UI_TEXT)
+            surf.blit(slab, (b.centerx - slab.get_width() // 2, b.centery - slab.get_height() // 2))
+        return {"next": nxt, "edit": edit}
 
     def draw_result(self, surf, sim, lay: Layout, hover: str = "",
                     motto: dict | None = None, motto_pending: bool = False):
@@ -682,16 +813,24 @@ class Overlays:
                     surf.blit(slab, (x + lay.px(6), y))
                     y += f.body.get_height() + lay.px(2)
             y += lay.px(8)
+        changes = getattr(sim, "strategy_changes", 0)
         info = [
             sim.result_reason or (f.jp("生存中。", "Still alive.") if hero.alive
                                   else f.jp("英雄は倒れた。", "The hero fell.")),
             f"{f.jp('得点', 'Score')}: {sim.score()}",
             f"{f.jp('生存日数', 'Days')}: {hero.days_survived}",
-            f"{f.jp('混乱', 'Confusions')}: {hero.confusion_count}",
+            (f"{f.jp('混乱', 'Confusions')}: {hero.confusion_count}    "
+             f"{f.jp('作戦変更', 'Order changes')}: {changes}{f.jp('回', '')}"),
             f"{f.jp('文明点', 'Civ pts')}: {hero.civilization_points()}",
             "",
             f.jp("銘言ベスト5:", "Best lines:"),
         ]
+        # If a 作戦 was standing at the end, show it (truncated) so the 戦績 reads
+        # whether the run was unassisted (0回) or directed.
+        advice = getattr(sim, "advice_from_heaven", None)
+        if advice:
+            shown = advice if len(advice) <= 36 else advice[:35] + "…"
+            info.insert(5, f.jp(f"最終作戦:「{shown}」", f"Final order: \"{shown}\""))
         lh = f.body.get_height() + lay.px(3)
         for ln in info:
             surf.blit(_render(f.body, ln, pal.UI_TEXT), (x, y))

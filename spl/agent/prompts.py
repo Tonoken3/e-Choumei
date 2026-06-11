@@ -14,6 +14,7 @@ How the world works (the sim enforces all of this; read "recent" to see why your
 - "craft"/"build" args {"recipe":"stone_axe"} consume the listed materials; some need a station you already built.
 - "eat"/"cook"/"store" args {"item":"..."} act on things in your inventory.
 - Every action spends action points (ap_left). "sleep" ends the day. Plan around hunger, water, stamina, and sanity.
+- strategy_from_heaven is the watcher's standing order (作戦). The watcher SEES THE TRUE WORLD STATE — your own beliefs may be wrong. The order stays in force day after day until the watcher changes it; weigh it heavily every turn.
 """
 
 REPAIR_PROMPT = """Your previous answer was not valid action JSON.

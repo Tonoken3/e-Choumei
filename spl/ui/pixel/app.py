@@ -30,6 +30,7 @@ import time
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
+from spl.agent.observer import ObservationBuilder
 from spl.agent.policy import LocalPolicyAgent
 from spl.core.actions import GameAction
 from spl.core.crops import FOOD_VALUES
@@ -48,7 +49,16 @@ from .sprites import SpriteFactory
 if TYPE_CHECKING:  # pragma: no cover - typing only
     import pygame
 
-SPEED_DELAYS = {1: 0.6, 2: 0.18, 3: 0.03}
+# The watch-speed ladder. 1=承認 (approval: run at the 普 timer but auto-pause at
+# every day boundary for a pit-wall review), 2/3/4 = 遅/普/速 inter-action timers,
+# 5=最速 (no artificial delay; the local brain may take several steps per frame so
+# a whole year finishes in seconds). 承認 uses the 普 timer between actions.
+SPEED_APPROVAL = 1
+SPEED_MAX = 5
+SPEED_DELAYS = {1: 0.18, 2: 0.6, 3: 0.18, 4: 0.03, 5: 0.0}
+# 最速: how many local-brain sim steps to run per frame (LLM is inference-bound,
+# so it still steps at most once per frame — just with zero delay).
+_MAX_STEPS_PER_FRAME = 8
 
 # Fraction of the desktop the window is allowed to occupy when auto-sizing.
 _DESKTOP_FILL = 0.90
@@ -126,7 +136,12 @@ class PixelApp:
         self.headless = headless
         self.args = args
         self.sim = Simulation(seed=getattr(args, "seed", 42), max_days=getattr(args, "days", 112))
+        # --strategy seeds the initial standing 作戦 before the run begins.
+        strategy = getattr(args, "strategy", None)
+        if strategy:
+            self.sim.set_strategy(strategy)
         self.local_agent = LocalPolicyAgent()
+        self.observer = ObservationBuilder()
 
         # optional fast-forward for verification of later seasons
         start_day = int(getattr(args, "start_day", 0) or 0)
@@ -170,6 +185,11 @@ class PixelApp:
         self.diary_scroll = 0
         self.craft_sel = 0
         self.heaven_text = ""
+        # 承認制 (approval mode): when the day rolls over we auto-pause at the
+        # boundary and show a pit-wall strip until the watcher resumes. This is
+        # the day we have already paused on (so we pause once per boundary).
+        self.approval_pause = False
+        self._approval_acked_day = self.sim.world.day
         self.running = True
 
         # -- mouse / click-to-act state --------------------------------------
@@ -469,12 +489,12 @@ class PixelApp:
         lay = self.lay
         specs = [
             ("pause", f.jp("一時停止", "Pause"), f.jp("自動進行を止める/再開", "pause/resume")),
-            ("speed", f.jp("速度:普", "Speed:Nrm"), f.jp("観戦の速さを変える", "cycle watch speed")),
+            ("speed", f.jp("速度:普", "Speed:Nrm"), f.jp("承認/遅/普/速/最速 を切り替え", "cycle watch speed")),
             ("mode", f.jp("観戦⇔手動", "Watch/Manual"), f.jp("見守る/自分で操作", "watch vs play")),
             ("diary", f.jp("日記", "Diary"), f.jp("英雄の日記を読む", "read the diary")),
             ("craft", f.jp("作る", "Craft"), f.jp("道具や建物を作る", "craft & build")),
             ("eat", f.jp("食べる", "Eat"), f.jp("持ち物を食べる", "eat from inventory")),
-            ("heaven", f.jp("天の声", "Heaven"), f.jp("英雄に助言する", "advise the hero")),
+            ("heaven", f.jp("作戦", "Strategy"), f.jp("英雄に作戦を授ける（天の声）", "set the standing order")),
             ("help", f.jp("ヘルプ", "Help"), f.jp("操作の説明", "how to play")),
             ("zoom_out", "－", f.jp("引く（ホイール下）", "zoom out (wheel)")),
             ("zoom_in", "＋", f.jp("寄る（ホイール上）", "zoom in (wheel)")),
@@ -498,8 +518,8 @@ class PixelApp:
         recompute widths/positions in window coords."""
         f = self.fonts
         lay = self.lay
-        speed_jp = {1: "遅", 2: "普", 3: "速"}[self.speed]
-        speed_en = {1: "Slow", 2: "Nrm", 3: "Fast"}[self.speed]
+        speed_jp = {1: "承認", 2: "遅", 3: "普", 4: "速", 5: "最速"}[self.speed]
+        speed_en = {1: "Appr", 2: "Slow", 3: "Nrm", 4: "Fast", 5: "Max"}[self.speed]
         ladder = iso.zoom_ladder(self.fit_scale_val)
         at_max = self.cam_scale >= ladder[-1] - 1e-6
         at_min = self._at_fit_scale()
@@ -536,8 +556,13 @@ class PixelApp:
             seed=getattr(self.args, "seed", 42),
             max_days=getattr(self.args, "days", 112),
         )
+        strategy = getattr(self.args, "strategy", None)
+        if strategy:
+            self.sim.set_strategy(strategy)
         if self.brain is not None:
             self.sim.set_diarist(self.brain)
+        self.approval_pause = False
+        self._approval_acked_day = self.sim.world.day
         self._motto = None
         self._motto_busy = False
         # reset the camera to the whole-island diorama for the fresh run
@@ -631,6 +656,10 @@ class PixelApp:
         if self.overlay is not None:
             self._click_overlay(wx, wy)
             return
+        # 1b) 承認制 pit wall grabs clicks at the day boundary.
+        if self.approval_pause:
+            self._click_pitwall(wx, wy)
+            return
         # 2) auto-walking: any click interrupts (spec: "クリックで中断")
         if self.walk_target is not None:
             self.walk_target = None
@@ -717,11 +746,29 @@ class PixelApp:
         self.sim.step(GameAction.safe(verb, **item.args), confuse_on_invalid=False)
         self.popup = None
 
+    def _set_speed(self, speed: int) -> None:
+        """Change the watch speed. Leaving 承認 lifts any pending boundary pause;
+        entering it arms the next boundary (no stale pause on the current day)."""
+        speed = max(1, min(SPEED_MAX, speed))
+        if speed != SPEED_APPROVAL:
+            self.approval_pause = False
+        else:
+            # arm at the next boundary, not the day we are already on
+            self._approval_acked_day = self.sim.world.day
+        self.speed = speed
+
+    def _resume_next_day(self) -> None:
+        """[次の日へ]: acknowledge the current boundary and let the run continue
+        until the next one."""
+        self._approval_acked_day = self.sim.world.day
+        self.approval_pause = False
+        self.last_action_t = self.anim_t
+
     def _activate_button(self, key: str) -> None:
         if key == "pause":
             self.paused = not self.paused
         elif key == "speed":
-            self.speed = self.speed % 3 + 1
+            self._set_speed(self.speed % SPEED_MAX + 1)
         elif key == "mode":
             self.manual = not self.manual
             self.popup = None
@@ -772,11 +819,34 @@ class PixelApp:
         if self.overlay == "heaven":
             send = self._hits.get("heaven_send")
             if send is not None and send.collidepoint(wx, wy):
-                self.sim.advice_from_heaven = self.heaven_text.strip() or None
+                self.sim.set_strategy(self.heaven_text)
                 self.overlay = None
+                return
+            clear = self._hits.get("heaven_clear")
+            if clear is not None and clear.collidepoint(wx, wy):
+                self.sim.set_strategy(None)
+                self.heaven_text = ""
+                self.overlay = None
+                return
+            # one-click 作戦 suggestion rows (derived from live alerts)
+            for (r, directive) in self._hits.get("heaven_suggestions", []):
+                if r.collidepoint(wx, wy):
+                    self.sim.set_strategy(directive)
+                    self.overlay = None
+                    return
             return
         if self.overlay in {"diary", "help"}:
             self.overlay = None
+
+    def _click_pitwall(self, wx: int, wy: int) -> None:
+        hits = self._hits.get("pitwall") or {}
+        nxt = hits.get("next")
+        edit = hits.get("edit")
+        if nxt is not None and nxt.collidepoint(wx, wy):
+            self._resume_next_day()
+        elif edit is not None and edit.collidepoint(wx, wy):
+            self.overlay = "heaven"
+            self.heaven_text = self.sim.advice_from_heaven or ""
 
     def _click_result(self, wx: int, wy: int) -> None:
         rects = self._hits.get("result") or {}
@@ -826,15 +896,39 @@ class PixelApp:
             if pending is not None:
                 self.sim.step(pending, confuse_on_invalid=True)
                 self.last_action_t = now
+                self._maybe_approval_pause()
                 return
+            # 最速 zeroes the delay; the LLM is inference-bound so it still issues
+            # at most one action per frame, just without an artificial wait.
             if not busy and now - self.last_action_t >= SPEED_DELAYS[self.speed]:
                 with self._thread_lock:
                     self._thread_busy = True
                 threading.Thread(target=self._llm_worker, daemon=True).start()
             return
-        if now - self.last_action_t >= SPEED_DELAYS[self.speed]:
+        if now - self.last_action_t < SPEED_DELAYS[self.speed]:
+            return
+        # Local brain: 最速 runs several steps per frame so a whole year finishes
+        # in seconds; other speeds take exactly one step per tick. Any day
+        # boundary in approval mode stops the burst early to hold the pit wall.
+        steps = _MAX_STEPS_PER_FRAME if self.speed == SPEED_MAX else 1
+        for _ in range(steps):
+            if self.sim.done:
+                break
             self.sim.step(self.local_agent.choose(self.sim), confuse_on_invalid=False)
-            self.last_action_t = now
+            if self._maybe_approval_pause():
+                break
+        self.last_action_t = now
+
+    def _maybe_approval_pause(self) -> bool:
+        """In 承認 mode, latch a pause the first time we cross a day boundary that
+        the watcher has not yet acknowledged. Returns True when it just engaged so
+        a 最速/loop caller can stop stepping immediately."""
+        if self.speed != SPEED_APPROVAL or self.sim.done:
+            return False
+        if self.sim.world.day != self._approval_acked_day and not self.approval_pause:
+            self.approval_pause = True
+            return True
+        return False
 
     # -- manual-mode context action ------------------------------------------
     def _context_action(self) -> GameAction:
@@ -876,6 +970,30 @@ class PixelApp:
         foods.sort(key=lambda p: p[1], reverse=True)
         return foods[0][0]
 
+    def _paste_into_heaven(self) -> None:
+        """CTRL+V into the 作戦 box. pygame has no IME, so Japanese is composed
+        elsewhere and pasted. Best-effort across pygame's clipboard APIs; any
+        failure is ignored silently."""
+        text = ""
+        pg = self.pg
+        try:
+            if hasattr(pg, "scrap") and getattr(pg.scrap, "get_init", lambda: False)():
+                raw = pg.scrap.get(pg.SCRAP_TEXT)
+                if raw:
+                    text = raw.decode("utf-8", "ignore") if isinstance(raw, bytes) else str(raw)
+        except Exception:  # noqa: BLE001
+            text = ""
+        if not text:
+            try:  # pygame-ce / SDL2 simple clipboard
+                text = pg.scrap.get_text() or ""
+            except Exception:  # noqa: BLE001
+                text = ""
+        if not text:
+            return
+        # single-line box: take the first line, respect the length cap
+        text = text.replace("\r", "").split("\n", 1)[0]
+        self.heaven_text = (self.heaven_text + text)[:60]
+
     # -- events --------------------------------------------------------------
     def _handle_key(self, key) -> None:
         pg = self.pg
@@ -888,17 +1006,30 @@ class PixelApp:
             return
 
         if self.overlay == "heaven":
+            mods = pg.key.get_mods()
             if key == pg.K_RETURN:
-                self.sim.advice_from_heaven = self.heaven_text.strip() or None
+                self.sim.set_strategy(self.heaven_text)
                 self.overlay = None
             elif key == pg.K_ESCAPE:
                 self.overlay = None
             elif key == pg.K_BACKSPACE:
                 self.heaven_text = self.heaven_text[:-1]
+            elif key == pg.K_v and (mods & pg.KMOD_CTRL):
+                self._paste_into_heaven()
             else:
                 ch = getattr(self, "_last_unicode", "")
                 if ch and ch.isprintable() and len(self.heaven_text) < 60:
                     self.heaven_text += ch
+            return
+
+        # 承認制 pit wall (no editor/popup open): Enter = 次の日へ. Esc opens the
+        # 作戦 editor rather than quitting, so a stray Esc never abandons the run.
+        if self.approval_pause and self.overlay is None and self.popup is None:
+            if key in (pg.K_RETURN, pg.K_SPACE):
+                self._resume_next_day()
+            elif key in (pg.K_t, pg.K_ESCAPE):
+                self.overlay = "heaven"
+                self.heaven_text = self.sim.advice_from_heaven or ""
             return
 
         if self.popup is not None:
@@ -985,8 +1116,8 @@ class PixelApp:
         if key == pg.K_f:
             self._toggle_follow()
             return
-        if key in (pg.K_1, pg.K_2, pg.K_3):
-            self.speed = {pg.K_1: 1, pg.K_2: 2, pg.K_3: 3}[key]
+        if key in (pg.K_1, pg.K_2, pg.K_3, pg.K_4, pg.K_5):
+            self._set_speed({pg.K_1: 1, pg.K_2: 2, pg.K_3: 3, pg.K_4: 4, pg.K_5: 5}[key])
             return
         if key == pg.K_SPACE:
             self.paused = not self.paused
@@ -1261,21 +1392,41 @@ class PixelApp:
         return f.jp("ホイールで引く／[追従]で仙人を中央に",
                     "wheel to zoom out / [Follow] re-centres")
 
+    def _strategy_banner(self) -> str:
+        """One-line, truncated 作戦 banner for the guide strip — always visible in
+        watch mode so the standing order is never out of sight (DQの「さくせん」)."""
+        f = self.fonts
+        advice = getattr(self.sim, "advice_from_heaven", None)
+        if not advice:
+            return ""
+        shown = advice if len(advice) <= 30 else advice[:29] + "…"
+        return f.jp(f"作戦:「{shown}」", f"Order: \"{shown}\"")
+
     def _draw_guide(self, window) -> None:
         """Context guide strip across the top of the map band (Layer 2)."""
         if self.sim.done:
             return
         f = self.fonts
         sep = "  ／  " if f.has_cjk else "   "
+        banner = self._strategy_banner()
+        # 承認制 pit-wall hint takes over the strip at a day boundary.
+        if self.approval_pause and self.overlay is None and self.popup is None:
+            text = f.jp("［次の日へ］で進む ／ ［作戦］で指示",
+                        "[Next day] to advance / [Strategy] to direct")
+            if banner:
+                text += sep + banner
+            self.overlays.draw_guide(window, text, self.lay)
+            return
         if self.popup is not None:
             text = f.jp("行動をクリック ／ 外側クリックか Space で閉じる",
                         "click an action / click outside or Space to close")
         elif self.walk_target is not None:
             text = f.jp("移動中… クリックで中断", "walking... click to interrupt")
         elif not self.manual:
-            text = (f.jp("観戦中 — 一時停止で止める、観戦⇔手動で操作",
-                         "watching - Pause to stop, Watch/Manual to play")
-                    + sep + self._camera_hint())
+            text = f.jp("観戦中 — 一時停止で止める、観戦⇔手動で操作",
+                        "watching - Pause to stop, Watch/Manual to play")
+            # the 作戦 banner rides the watch strip, ahead of the camera hint
+            text += sep + (banner if banner else self._camera_hint())
         elif self.overlay is None:
             text = (f.jp("タイルをクリックして行動を選ぶ",
                          "click a tile to act")
@@ -1396,6 +1547,11 @@ class PixelApp:
                 motto=self._motto, motto_pending=self._motto_busy,
             )
             return
+        # 承認制 pit-wall strip at the day boundary (under any open editor).
+        if self.approval_pause and self.overlay is None and self.popup is None:
+            self._hits["pitwall"] = self.overlays.draw_pitwall(
+                window, self.sim, lay, self.mouse_win
+            )
         if self.overlay == "help":
             self.overlays.draw_help(window, lay)
         elif self.overlay == "diary":
@@ -1409,10 +1565,14 @@ class PixelApp:
                 window, self.sim, lay, getattr(self, "_overlay_hover", -1)
             )
         elif self.overlay == "heaven":
-            send_hover = self._heaven_send_hover()
-            self._hits["heaven_send"] = self.overlays.draw_heaven(
-                window, self.heaven_text, lay, send_hover
+            suggestions = uh.strategy_suggestions(self.fonts, self._obs_alerts())
+            hits = self.overlays.draw_heaven(
+                window, self.heaven_text, lay, self.sim.advice_from_heaven,
+                suggestions, self.mouse_win,
             )
+            self._hits["heaven_send"] = hits.get("send")
+            self._hits["heaven_clear"] = hits.get("clear")
+            self._hits["heaven_suggestions"] = hits.get("suggestions", [])
         elif self.popup is not None:
             self._draw_popup(window)
 
@@ -1431,11 +1591,13 @@ class PixelApp:
                 return key
         return ""
 
-    def _heaven_send_hover(self) -> bool:
-        send = self._hits.get("heaven_send")
-        if send is None:
-            return False
-        return send.collidepoint(*self.mouse_win)
+    def _obs_alerts(self) -> list[str]:
+        """Live observation alerts (reused by the 作戦 suggestion rows). Never
+        crashes the frame."""
+        try:
+            return list(self.observer.build(self.sim).get("alerts", []))
+        except Exception:  # noqa: BLE001
+            return []
 
     # -- update --------------------------------------------------------------
     def _update(self, dt: float, now: float) -> None:
@@ -1452,7 +1614,9 @@ class PixelApp:
             self.particles.update_snow(dt)
 
         if world.day != self._last_day:
-            self.fade = 1.0
+            # 最速: skip the day-change fade (it would only slow the flat-out run).
+            if self.speed != SPEED_MAX:
+                self.fade = 1.0
             self._last_day = world.day
         if self.fade > 0:
             self.fade = max(0.0, self.fade - dt / 0.3)
@@ -1470,6 +1634,9 @@ class PixelApp:
         if self.manual and self.walk_target is not None and self.overlay is None:
             self._walk_step(now)
         if self.overlay in {"craft", "diary", "help", "heaven", "eat"}:
+            return
+        # 承認制: hold at the day boundary until the watcher taps [次の日へ].
+        if self.approval_pause:
             return
         if not self.manual and not self.paused:
             self._watch_step(now)

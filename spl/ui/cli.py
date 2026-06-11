@@ -30,6 +30,8 @@ HELP_TEXT = """Commands:
 
 def run_play(args: object) -> int:
     sim = Simulation(seed=args.seed, max_days=args.days)
+    if getattr(args, "strategy", None):
+        sim.set_strategy(args.strategy)
     local_agent = LocalPolicyAgent()
     brain = _make_brain(args)
     observer = ObservationBuilder()
@@ -71,8 +73,16 @@ def run_play(args: object) -> int:
             sim.step(action)
         else:
             if args.heaven and sys.stdin.isatty() and sim.world.day != last_day:
-                advice = input("\nVoice from heaven for today (Enter to skip): ").strip()
-                sim.advice_from_heaven = advice or None
+                current = sim.advice_from_heaven or "（なし）"
+                advice = input(
+                    f"\n天の声 — 現在の作戦「{current}」"
+                    "（Enterで継承 / 文を入力で変更 / '-'で解除）: "
+                ).strip()
+                if advice in ("-", "clear"):
+                    sim.set_strategy(None)
+                elif advice:
+                    sim.set_strategy(advice)
+                # empty input keeps the standing 作戦 (it persists across days)
                 last_day = sim.world.day
             action = choose_action(sim, brain, local_agent, llm_enabled=args.llm)
             sim.step(action, confuse_on_invalid=args.llm)
@@ -106,6 +116,8 @@ def _final_motto(sim: Simulation, brain: object | None) -> dict[str, object]:
 
 def run_simulate(args: object) -> int:
     sim = Simulation(seed=args.seed, max_days=args.days)
+    if getattr(args, "strategy", None):
+        sim.set_strategy(args.strategy)
     local_agent = LocalPolicyAgent()
     brain = _make_brain(args)
     if args.llm and brain is not None:
@@ -273,6 +285,12 @@ def print_result(sim: Simulation, motto: dict[str, object] | None = None,
     print(f"Score: {sim.score()}")
     print(f"Days survived: {sim.hero.days_survived}")
     print(f"Confusions: {sim.hero.confusion_count}")
+    # 作戦: how directed was the run? (0回 = unassisted)
+    print(f"作戦変更: {getattr(sim, 'strategy_changes', 0)}回")
+    if sim.advice_from_heaven:
+        final = sim.advice_from_heaven
+        shown = final if len(final) <= 40 else final[:39] + "…"
+        print(f"最終作戦: 「{shown}」")
     # 思考予算 summary when an LLM brain played.
     if brain is not None and getattr(brain, "calls", 0) > 0:
         tier = brain.current_tier()
