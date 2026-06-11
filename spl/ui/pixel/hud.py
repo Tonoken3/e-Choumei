@@ -448,6 +448,8 @@ class Overlays:
             "    C/D/T: " + f.jp("作る/日記/天の声", "craft/diary/heaven"),
             "1/2/3: " + f.jp("速度", "speed") + "    M: " +
             f.jp("観戦⇔手動", "watch<->manual") + "    H: " + f.jp("ヘルプ", "help"),
+            f.jp("ホイール/＋－: 寄る・引く   F: 仙人を追従   右ドラッグ: 視点移動",
+                 "Wheel/+-: zoom   F: follow the hermit   right-drag: pan"),
         ]
         lh = f.body.get_height() + lay.px(3)
         y = rect.y + f.big.get_height() + lay.px(10)
@@ -856,11 +858,17 @@ class Overlays:
         for b in buttons:
             r = b.rect
             hot = (b.key == hover_key) and b.enabled
-            bg = pal.UI_PANEL_LIGHT if hot else pal.UI_PANEL
-            border = pal.UI_GOLD if hot else pal.UI_BORDER
+            active = getattr(b, "active", False) and b.enabled
+            # active (toggled-on) buttons sit lit with a gold border so a glance
+            # tells you follow is engaged; hover still brightens on top.
+            bg = pal.UI_PANEL_LIGHT if (hot or active) else pal.UI_PANEL
+            border = pal.UI_GOLD if (hot or active) else pal.UI_BORDER
             pg.draw.rect(surf, bg, r, border_radius=rad)
             pg.draw.rect(surf, border, r, max(1, lay.px(2)), border_radius=rad)
-            color = pal.UI_TEXT if b.enabled else pal.UI_TEXT_DIM
+            if active:
+                color = pal.UI_GOLD
+            else:
+                color = pal.UI_TEXT if b.enabled else pal.UI_TEXT_DIM
             lab = _render(f.label, b.label, color)
             surf.blit(lab, (r.centerx - lab.get_width() // 2, r.centery - lab.get_height() // 2))
             if hot and b.tooltip:

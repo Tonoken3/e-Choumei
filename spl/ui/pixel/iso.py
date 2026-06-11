@@ -11,8 +11,9 @@ projects to the screen top corner of its diamond with::
 
 The base tile is twice the stage-3 size (``TILE_W=64``, ``TILE_H=32``). The
 world is rendered at *native* window resolution, so a ``scale`` float (the
-sprite scale: 0.75 / 1.0 / 1.25 / 1.5) multiplies every geometric constant. All
-functions take that ``scale`` so picking and centring stay exact at any zoom.
+sprite scale: 0.75 / 1.0 / 1.25 / 1.5 / 2.0 / 2.5 / 3.0) multiplies every
+geometric constant. All functions take that ``scale`` so picking and centring
+stay exact at any zoom. The upper rungs are the camera's zoom-to-read ladder.
 
 Heights (at scale 1.0, in screen px):
 
@@ -41,8 +42,11 @@ WATER_DROP = 8    # water top sits this far below a land top
 BEACH_DROP = 4    # beach top sits this far below grass top
 SEABED_H = 22     # outer edge sides drop this far to the seabed slab
 
-# Discrete sprite scales the SpriteFactory caches at.
-SPRITE_SCALES = (0.75, 1.0, 1.25, 1.5)
+# Discrete sprite scales the SpriteFactory caches at. The upper rungs
+# (2.0 / 2.5 / 3.0) are the *camera zoom* ladder used to close in on the hermit
+# until the speech bubbles (銘言) are comfortably readable; the lower rungs keep
+# the whole-island diorama in view. Caches stay bounded (one factory per scale).
+SPRITE_SCALES = (0.75, 1.0, 1.25, 1.5, 2.0, 2.5, 3.0)
 
 
 def s_round(v: float, scale: float) -> int:
@@ -148,3 +152,29 @@ def fit_scale(width: int, height: int, band_w: int, band_h: int,
         if mw <= band_w and mh + headroom <= band_h:
             best = sc
     return best
+
+
+def zoom_ladder(min_scale: float) -> tuple[float, ...]:
+    """The usable zoom rungs for the camera: every discrete scale at or above
+    the fit (whole-island) scale. The fit scale is the floor — you can always
+    zoom back out to the full diorama but never *past* it (that would just leave
+    sea around the island)."""
+    rungs = tuple(s for s in SPRITE_SCALES if s >= min_scale - 1e-6)
+    return rungs or (SPRITE_SCALES[0],)
+
+
+def step_scale(scale: float, direction: int, min_scale: float) -> float:
+    """Move ``scale`` one rung up (direction>0) or down (direction<0) the zoom
+    ladder, clamped to [fit, max]. Snaps to the nearest rung first so a free
+    scale still lands cleanly."""
+    rungs = zoom_ladder(min_scale)
+    # index of the current rung (nearest), then step
+    idx = min(range(len(rungs)), key=lambda i: abs(rungs[i] - scale))
+    idx = max(0, min(len(rungs) - 1, idx + (1 if direction > 0 else -1)))
+    return rungs[idx]
+
+
+def clamp_scale(scale: float, min_scale: float) -> float:
+    """Clamp a scale to the ladder's [fit, max] range and snap to a rung."""
+    rungs = zoom_ladder(min_scale)
+    return min(rungs, key=lambda r: abs(r - scale))

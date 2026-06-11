@@ -146,6 +146,20 @@ class PixelApp:
         self.particles = Particles()
         self._terrain: "pygame.Surface | None" = None
         self._terrain_sig: tuple | None = None
+        self._terrain_baked: tuple[int, int] = (0, 0)
+        # -- camera (offset, scale) -----------------------------------------
+        # ``cam_scale`` is the live zoom; ``fit_scale_val`` is the whole-island
+        # floor. ``follow`` glides the camera so the hermit stays centred; pan
+        # (right/middle drag) suspends it. ``cam_target_*`` are the offsets the
+        # follow/pan drive toward; ``offset_*`` lerp to them for a soft glide.
+        self.cam_scale = 1.0
+        self.fit_scale_val = 1.0
+        self.follow = False
+        self._follow_armed = False  # auto-enable follow the first zoom-in
+        self.panning = False
+        self._pan_last = (0, 0)
+        self.cam_target_x = 0
+        self.cam_target_y = 0
         self._apply_window(win_w, win_h)
 
         # modes / state
@@ -210,38 +224,197 @@ class PixelApp:
 
     def _apply_window(self, win_w: int, win_h: int) -> None:
         """(Re)build fonts, layout, sprite factory and world offsets for a new
-        window size. Picks a discrete sprite scale so the island fits the band,
-        rebuilds the factory only when that scale changes, and invalidates the
-        cached terrain."""
+        window size. The *fit* scale (whole-island floor) is recomputed for the
+        new band; the live camera zoom is kept (clamped into the new ladder) so
+        a resize doesn't yank the view. Rebuilds the factory only when the scale
+        changes, and invalidates the cached terrain."""
         ui = ui_scale_for(win_h)
         self.fonts.for_scale(ui)
-        # provisional layout to know the map band, then pick the sprite zoom
+        # provisional layout to know the map band, then pick the fit (floor) zoom
         lay0 = compute_layout(self.pg, win_w, win_h, 1.0)
         world = self.sim.world
-        sprite_scale = iso.fit_scale(world.width, world.height,
-                                     lay0.map_rect.width, lay0.map_rect.height,
-                                     headroom=int(120 * ui / 2))
-        self.lay = compute_layout(self.pg, win_w, win_h, sprite_scale)
-        if abs(self.factory.scale - sprite_scale) > 1e-6:
-            self.factory = SpriteFactory(self.pg, scale=sprite_scale)
+        self.fit_scale_val = iso.fit_scale(world.width, world.height,
+                                           lay0.map_rect.width, lay0.map_rect.height,
+                                           headroom=int(120 * ui / 2))
+        # keep the live camera zoom (clamped into [fit, max]); default to fit
+        prev = getattr(self, "cam_scale", 0.0) or self.fit_scale_val
+        self.cam_scale = iso.clamp_scale(prev, self.fit_scale_val)
+        self._set_layout_for_scale(win_w, win_h, self.cam_scale)
         self._recompute_offsets()
         self.particles.resize(self.lay.map_rect.width, self.lay.map_rect.height)
         self._terrain = None
         self._terrain_sig = None
         self.buttons = self._build_buttons()
 
-    def _recompute_offsets(self) -> None:
-        """World-to-screen offsets in *map-band* (window) coordinates."""
+    def _set_layout_for_scale(self, win_w: int, win_h: int, scale: float) -> None:
+        """Build the layout + sprite factory for a given camera zoom, rebuilding
+        the factory only when the scale actually changes."""
+        self.lay = compute_layout(self.pg, win_w, win_h, scale)
+        if abs(self.factory.scale - scale) > 1e-6:
+            self.factory = SpriteFactory(self.pg, scale=scale)
+
+    def _centered_offsets(self, scale: float) -> tuple[int, int]:
+        """The offsets that centre the whole island in the band at ``scale``
+        (window coords). This is the resting view at fit scale and the clamp
+        anchor for pan."""
         lay = self.lay
         world = self.sim.world
-        sc = lay.sprite_scale
-        overhang = int(round(48 * sc))  # headroom for tall sprites above ground
+        overhang = int(round(48 * scale))  # headroom for tall sprites above ground
         ox, oy = iso.centering_offset(world.width, world.height,
                                       lay.map_rect.width, lay.map_rect.height,
-                                      sc, overhang_top=overhang)
-        # express in window coords (map band starts at map_rect.topleft)
-        self.offset_x = ox + lay.map_rect.x
-        self.offset_y = oy + lay.map_rect.y
+                                      scale, overhang_top=overhang)
+        return ox + lay.map_rect.x, oy + lay.map_rect.y
+
+    def _recompute_offsets(self) -> None:
+        """Reset the camera to the centred-island view (used on (re)build/resize
+        and whenever we're at the fit-all floor)."""
+        ox, oy = self._centered_offsets(self.lay.sprite_scale)
+        self.offset_x = ox
+        self.offset_y = oy
+        self.cam_target_x = ox
+        self.cam_target_y = oy
+
+    # -- camera (zoom / follow / pan) ----------------------------------------
+    def _at_fit_scale(self) -> bool:
+        """True when zoomed all the way out to the whole-island floor — where
+        follow/pan are inert and the view is the centred diorama."""
+        return self.cam_scale <= self.fit_scale_val + 1e-6
+
+    def _clamp_offset(self, ox: int, oy: int) -> tuple[int, int]:
+        """Keep the island from sliding entirely out of the band: at least ~25%
+        of its projected footprint must stay visible on every side. At the fit
+        floor this collapses to the centred view."""
+        lay = self.lay
+        sc = self.lay.sprite_scale
+        world = self.sim.world
+        if self._at_fit_scale():
+            return self._centered_offsets(sc)
+        map_w, map_h = iso.map_pixel_size(world.width, world.height, sc)
+        # leftmost projected screen-x (cell (0,h-1)) sits at min_sx + offset.
+        min_sx = (0 - (world.height - 1)) * iso.half_w(sc)
+        band = lay.map_rect
+        keep_w = int(map_w * 0.25)
+        keep_h = int(map_h * 0.25)
+        # world bbox left/top/right/bottom in window coords for a given offset
+        # left edge x = offset_x + min_sx ; span map_w. top edge y = offset_y.
+        # Require keep_* px of the bbox to overlap the band on each axis.
+        lo_x = band.left - (min_sx + map_w - keep_w)
+        hi_x = band.right - (min_sx + keep_w)
+        lo_y = band.top - (map_h - keep_h)
+        hi_y = band.bottom - keep_h
+        cx = max(lo_x, min(hi_x, ox))
+        cy = max(lo_y, min(hi_y, oy))
+        return cx, cy
+
+    def _follow_offset(self) -> tuple[int, int]:
+        """Offset that centres the hermit in the map band at the current zoom."""
+        lay = self.lay
+        sc = lay.sprite_scale
+        hero = self.sim.hero.pos
+        # screen position of the hero's tile centre at offset (0,0)
+        cx0, cy0 = iso.tile_center(hero.x, hero.y, 0, 0, sc)
+        cx0 -= self.factory.ground_top_y(self.sim.world.tile_at(hero))
+        # raise the centre a touch so the speech bubble above the head has room
+        band = lay.map_rect
+        target_x = band.centerx
+        target_y = band.centery + int(round(28 * sc))
+        return target_x - cx0, target_y - cy0
+
+    def _update_follow_target(self) -> None:
+        """Set the camera target. Follow centres the hermit; otherwise the
+        target is wherever pan left it (clamped). At the fit floor it's centred."""
+        if self._at_fit_scale():
+            self.cam_target_x, self.cam_target_y = self._centered_offsets(self.lay.sprite_scale)
+            return
+        if self.follow and not self.panning:
+            ox, oy = self._follow_offset()
+            self.cam_target_x, self.cam_target_y = self._clamp_offset(ox, oy)
+
+    def _glide_camera(self) -> None:
+        """Lerp the live offset toward the camera target (~0.12/frame) so motion
+        glides instead of snapping."""
+        if self._at_fit_scale():
+            self.offset_x, self.offset_y = self.cam_target_x, self.cam_target_y
+            return
+        k = 0.12
+        dx = self.cam_target_x - self.offset_x
+        dy = self.cam_target_y - self.offset_y
+        if abs(dx) < 1 and abs(dy) < 1:
+            self.offset_x, self.offset_y = self.cam_target_x, self.cam_target_y
+            return
+        self.offset_x = int(round(self.offset_x + dx * k))
+        self.offset_y = int(round(self.offset_y + dy * k))
+
+    def _zoom_at(self, direction: int, anchor: tuple[int, int] | None) -> None:
+        """Step the zoom ladder up (direction>0) or down. The world point under
+        ``anchor`` (window px; defaults to band centre) stays fixed. Arms follow
+        the first time we zoom past the fit floor."""
+        new_scale = iso.step_scale(self.cam_scale, direction, self.fit_scale_val)
+        if abs(new_scale - self.cam_scale) < 1e-6:
+            return
+        lay = self.lay
+        if anchor is None or not lay.map_rect.collidepoint(*anchor):
+            anchor = lay.map_rect.center
+        ax, ay = anchor
+        old_scale = self.cam_scale
+        # world point (continuous tile coords) under the anchor at the old zoom
+        ratio = new_scale / old_scale
+        # new offset so that the same screen anchor maps to the same world point:
+        #   screen = world*scale + offset  ->  keep (anchor-offset) scaled by ratio
+        self.cam_scale = new_scale
+        self._set_layout_for_scale(self.lay.win_w, self.lay.win_h, new_scale)
+        # the projection is linear in scale about the offset, so:
+        new_ox = ax - int(round((ax - self.offset_x) * ratio))
+        new_oy = ay - int(round((ay - self.offset_y) * ratio))
+        # auto-arm follow the first time the user closes in past the diorama
+        if not self._at_fit_scale() and not self._follow_armed:
+            self.follow = True
+            self._follow_armed = True
+        self.offset_x, self.offset_y = self._clamp_offset(new_ox, new_oy)
+        self.cam_target_x, self.cam_target_y = self.offset_x, self.offset_y
+        self._update_follow_target()
+        # terrain is baked at origin per scale -> only the scale change matters
+        self._terrain = None
+        self._terrain_sig = None
+
+    def _pan_by(self, dx: int, dy: int) -> None:
+        """Right/middle-drag pan: move the camera and suspend follow."""
+        if self._at_fit_scale():
+            return
+        if self.follow:
+            self.follow = False
+        ox, oy = self._clamp_offset(self.offset_x + dx, self.offset_y + dy)
+        self.offset_x, self.offset_y = ox, oy
+        self.cam_target_x, self.cam_target_y = ox, oy
+
+    def _toggle_follow(self) -> None:
+        self.follow = not self.follow
+        self._follow_armed = True
+        if self.follow:
+            self._update_follow_target()
+
+    def _camera_input_allowed(self) -> bool:
+        """Camera input (wheel/pan) is live only over the map band with no modal
+        overlay/popup grabbing the pointer, and not on the result screen."""
+        return (self.overlay is None and self.popup is None and not self.sim.done)
+
+    def _handle_wheel(self, direction: int, pos: tuple[int, int]) -> None:
+        if not self._camera_input_allowed():
+            return
+        if not self.lay.map_rect.collidepoint(*pos):
+            return
+        self._zoom_at(direction, pos)
+
+    def _begin_pan(self, pos: tuple[int, int]) -> None:
+        if not self._camera_input_allowed() or self._at_fit_scale():
+            return
+        if not self.lay.map_rect.collidepoint(*pos):
+            return
+        self.panning = True
+        self._pan_last = pos
+
+    def _end_pan(self) -> None:
+        self.panning = False
 
     def _resize(self, win_w: int, win_h: int) -> None:
         """On VIDEORESIZE: reflow to the new window size (UI scale follows the
@@ -303,6 +476,9 @@ class PixelApp:
             ("eat", f.jp("食べる", "Eat"), f.jp("持ち物を食べる", "eat from inventory")),
             ("heaven", f.jp("天の声", "Heaven"), f.jp("英雄に助言する", "advise the hero")),
             ("help", f.jp("ヘルプ", "Help"), f.jp("操作の説明", "how to play")),
+            ("zoom_out", "－", f.jp("引く（ホイール下）", "zoom out (wheel)")),
+            ("zoom_in", "＋", f.jp("寄る（ホイール上）", "zoom in (wheel)")),
+            ("follow", f.jp("追従", "Follow"), f.jp("仙人を追って中央に映す", "keep the hermit centred")),
         ]
         x = lay.map_rect.x + lay.px(6)
         y = lay.hud_top + lay.px(3)
@@ -324,13 +500,25 @@ class PixelApp:
         lay = self.lay
         speed_jp = {1: "遅", 2: "普", 3: "速"}[self.speed]
         speed_en = {1: "Slow", 2: "Nrm", 3: "Fast"}[self.speed]
+        ladder = iso.zoom_ladder(self.fit_scale_val)
+        at_max = self.cam_scale >= ladder[-1] - 1e-6
+        at_min = self._at_fit_scale()
         for b in self.buttons:
             if b.key == "pause":
                 b.label = f.jp("再開", "Resume") if self.paused else f.jp("一時停止", "Pause")
             elif b.key == "speed":
                 b.label = f.jp(f"速度:{speed_jp}", f"Speed:{speed_en}")
+            elif b.key == "follow":
+                # ● marks ON so the active state reads at a glance
+                b.label = f.jp("追従●", "Follow●") if self.follow else f.jp("追従", "Follow")
+                b.active = self.follow
+                b.enabled = not at_min  # inert at the whole-island floor
             if b.key in {"craft", "eat"}:
                 b.enabled = self.manual
+            if b.key == "zoom_in":
+                b.enabled = not at_max
+            if b.key == "zoom_out":
+                b.enabled = not at_min
         x = lay.map_rect.x + lay.px(6)
         y = lay.hud_top + lay.px(3)
         h = lay.button_bar_h - lay.px(6)
@@ -352,6 +540,12 @@ class PixelApp:
             self.sim.set_diarist(self.brain)
         self._motto = None
         self._motto_busy = False
+        # reset the camera to the whole-island diorama for the fresh run
+        self.cam_scale = self.fit_scale_val
+        self.follow = False
+        self._follow_armed = False
+        self.panning = False
+        self._set_layout_for_scale(self.lay.win_w, self.lay.win_h, self.cam_scale)
         self._recompute_offsets()
         self._terrain = None
         self._terrain_sig = None
@@ -391,6 +585,13 @@ class PixelApp:
 
     # -- mouse: motion -------------------------------------------------------
     def _handle_motion(self, wx: int, wy: int) -> None:
+        # right/middle-drag pan: move the camera by the cursor delta, suspend
+        # follow. Done before hover so the pan stays glued to the cursor.
+        if self.panning:
+            dx = wx - self._pan_last[0]
+            dy = wy - self._pan_last[1]
+            self._pan_last = (wx, wy)
+            self._pan_by(dx, dy)
         self.mouse_win = (wx, wy)
         self.mouse_map = self._win_to_map(wx, wy)
         if self.mouse_map is not None:
@@ -538,6 +739,12 @@ class PixelApp:
             self.heaven_text = self.sim.advice_from_heaven or ""
         elif key == "help":
             self.overlay = "help"
+        elif key == "zoom_in":
+            self._zoom_at(+1, None)  # buttons zoom about the band centre
+        elif key == "zoom_out":
+            self._zoom_at(-1, None)
+        elif key == "follow":
+            self._toggle_follow()
 
     def _click_overlay(self, wx: int, wy: int) -> None:
         from spl.core.actions import GameAction as _GA
@@ -768,6 +975,16 @@ class PixelApp:
         if key == pg.K_m:
             self.manual = not self.manual
             return
+        # camera: +/- zoom (mouse-only parity), F toggles hermit-follow
+        if key in (pg.K_PLUS, pg.K_EQUALS, pg.K_KP_PLUS):
+            self._zoom_at(+1, self.mouse_win if self.mouse_map else None)
+            return
+        if key in (pg.K_MINUS, pg.K_KP_MINUS, pg.K_UNDERSCORE):
+            self._zoom_at(-1, self.mouse_win if self.mouse_map else None)
+            return
+        if key == pg.K_f:
+            self._toggle_follow()
+            return
         if key in (pg.K_1, pg.K_2, pg.K_3):
             self.speed = {pg.K_1: 1, pg.K_2: 2, pg.K_3: 3}[key]
             return
@@ -833,29 +1050,42 @@ class PixelApp:
         self._draw_overlay(window)
 
     # -- static terrain cache ------------------------------------------------
+    # The terrain slab is baked ONCE per (season, scale, tiles) at a canonical
+    # *baked offset* into a surface sized to the full projected map. Panning and
+    # following only change where that slab is blitted, so they never rebuild it
+    # (a zoom *does* rebuild — different scale). ``_terrain_baked`` is the baked
+    # offset (window-ish coords) the slab was composed at.
+    def _terrain_baked_offset(self, sc: float) -> tuple[int, int]:
+        """Offset the terrain slab is baked at: places the leftmost/​topmost
+        projected pixel a small margin in from (0,0) so nothing clips the slab."""
+        world = self.sim.world
+        min_sx = (0 - (world.height - 1)) * iso.half_w(sc)
+        margin = iso.half_w(sc)
+        return -min_sx + margin, margin
+
     def _tiles_signature(self) -> tuple:
         world = self.sim.world
         rows = tuple("".join(row) for row in world.tiles)
+        # NOTE: offsets are deliberately NOT in the signature — the slab is baked
+        # at a fixed offset and re-blitted at the live camera offset.
         return (world.season, world.width, world.height,
-                self.lay.sprite_scale, self.offset_x, self.offset_y, rows)
+                self.lay.sprite_scale, rows)
 
     def _ensure_terrain(self) -> "pygame.Surface":
         """Compose all ground blocks (no objects, no shimmer) into one cached
-        full-map surface, in *map-band* coords. Rebuilt only when the tiles /
-        season / scale / offsets change."""
+        full-map surface, baked at a fixed canonical offset. Rebuilt only when
+        the tiles / season / scale change (NOT on pan/follow)."""
         sig = self._tiles_signature()
         if self._terrain is not None and self._terrain_sig == sig:
             return self._terrain
         pg = self.pg
-        lay = self.lay
         world = self.sim.world
         season = world.season
-        surf = pg.Surface(lay.map_rect.size, pg.SRCALPHA)
-        # map-band-local offsets (subtract the band origin)
-        ox = self.offset_x - lay.map_rect.x
-        oy = self.offset_y - lay.map_rect.y
-        sc = lay.sprite_scale
+        sc = self.lay.sprite_scale
         w, h = world.width, world.height
+        map_w, map_h = iso.map_pixel_size(w, h, sc)
+        ox, oy = self._terrain_baked_offset(sc)
+        surf = pg.Surface((ox + map_w, oy + map_h), pg.SRCALPHA)
         for (x, y) in iso.painter_order(w, h):
             tile = world.tiles[y][x]
             base = "forest" if tile == "forest" else tile
@@ -866,6 +1096,7 @@ class PixelApp:
             surf.blit(ground, (sx, sy - recess))
         self._terrain = surf
         self._terrain_sig = sig
+        self._terrain_baked = (ox, oy)
         return surf
 
     def _render_world(self, surf) -> None:
@@ -875,12 +1106,16 @@ class PixelApp:
         season = world.season
         frame = self._frame_index()
         lay = self.lay
-        # sea/seabed backdrop, then the cached terrain slab on top
+        # sea/seabed backdrop, then the cached terrain slab on top. The slab is
+        # baked at a fixed offset; blit it shifted by the live camera offset so
+        # panning/following never rebuild it.
         surf.fill(pal.sea_backdrop(season))
-        surf.blit(self._ensure_terrain(), (0, 0))
-
+        terrain = self._ensure_terrain()
         ox = self.offset_x - lay.map_rect.x
         oy = self.offset_y - lay.map_rect.y
+        bake_x, bake_y = self._terrain_baked
+        surf.blit(terrain, (ox - bake_x, oy - bake_y))
+
         sc = lay.sprite_scale
         # animated water shimmer + per-cell objects, in painter's order on top
         for (x, y) in iso.painter_order(world.width, world.height):
@@ -1012,22 +1247,39 @@ class PixelApp:
             lines.append(f.jp("クリックで行動", "click to act"))
         return lines
 
+    def _camera_hint(self) -> str:
+        """Short, contextual camera hint appended to the guide strip. Kept brief
+        so it always fits on one line beside the mode text."""
+        f = self.fonts
+        if self._at_fit_scale():
+            # whole-island diorama: invite zooming in to read the 銘言
+            return f.jp("ホイールで寄る／[追従]で仙人を追う",
+                        "wheel to zoom in / [Follow] the hermit")
+        if self.follow:
+            return f.jp("右ドラッグで視点移動／ホイールで引く",
+                        "right-drag to pan / wheel to zoom out")
+        return f.jp("ホイールで引く／[追従]で仙人を中央に",
+                    "wheel to zoom out / [Follow] re-centres")
+
     def _draw_guide(self, window) -> None:
         """Context guide strip across the top of the map band (Layer 2)."""
         if self.sim.done:
             return
         f = self.fonts
+        sep = "  ／  " if f.has_cjk else "   "
         if self.popup is not None:
             text = f.jp("行動をクリック ／ 外側クリックか Space で閉じる",
                         "click an action / click outside or Space to close")
         elif self.walk_target is not None:
             text = f.jp("移動中… クリックで中断", "walking... click to interrupt")
         elif not self.manual:
-            text = f.jp("観戦中 — 一時停止で止める、観戦⇔手動で操作、天の声で助言",
-                        "watching - Pause to stop, Watch/Manual to play, Heaven to advise")
+            text = (f.jp("観戦中 — 一時停止で止める、観戦⇔手動で操作",
+                         "watching - Pause to stop, Watch/Manual to play")
+                    + sep + self._camera_hint())
         elif self.overlay is None:
-            text = f.jp("タイルをクリックして行動を選ぶ ／ 下のボタンで 日記・作る・食べる",
-                        "click a tile to act / buttons below: diary, craft, eat")
+            text = (f.jp("タイルをクリックして行動を選ぶ",
+                         "click a tile to act")
+                    + sep + self._camera_hint())
         else:
             return
         self.overlays.draw_guide(window, text, self.lay)
@@ -1207,6 +1459,12 @@ class PixelApp:
 
         self._update_bubble(now)
 
+        # camera glide: refresh the follow/pan target, then ease the live offset
+        # toward it. The hermit's bubble anchors via the live offset, so it rides
+        # along automatically.
+        self._update_follow_target()
+        self._glide_camera()
+
         if self.sim.done:
             return
         if self.manual and self.walk_target is not None and self.overlay is None:
@@ -1245,6 +1503,15 @@ class PixelApp:
                         self._handle_click(*event.pos)
                     elif event.button in (4, 5) and self.overlay == "diary":
                         self.diary_scroll = max(0, self.diary_scroll + (1 if event.button == 5 else -1))
+                    elif event.button in (4, 5):
+                        # wheel over the map (no overlay/popup) steps the zoom
+                        # ladder, anchored at the cursor.
+                        self._handle_wheel(1 if event.button == 4 else -1, event.pos)
+                    elif event.button in (2, 3):
+                        self._begin_pan(event.pos)
+                elif event.type == pg.MOUSEBUTTONUP:
+                    if event.button in (2, 3):
+                        self._end_pan()
             self._update(dt, now)
             self.render(window)
             pg.display.flip()

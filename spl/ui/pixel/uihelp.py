@@ -143,6 +143,7 @@ class Button:
     tooltip: str
     rect: object = None  # pygame.Rect, assigned at layout time
     enabled: bool = True
+    active: bool = False  # toggled-on state (e.g. 追従 follow), drawn highlighted
 
 
 def crop_tooltip(fonts, sim, pos: Position) -> str | None:

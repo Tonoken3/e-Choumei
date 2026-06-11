@@ -324,6 +324,138 @@ class PixelVoxelTests(unittest.TestCase):
                 app.sim.world.weather = weather
                 app.render(win)  # must not raise
 
+    # -- camera: zoom / follow / pan -----------------------------------------
+    def test_zoom_ladder_includes_close_read_rungs(self) -> None:
+        from spl.ui.pixel import iso
+
+        for rung in (2.0, 2.5, 3.0):
+            self.assertIn(rung, iso.SPRITE_SCALES)
+        # ladder above a fit floor never drops below the floor
+        ladder = iso.zoom_ladder(1.0)
+        self.assertEqual(ladder[0], 1.0)
+        self.assertTrue(all(r >= 1.0 for r in ladder))
+
+    def test_wheel_zoom_steps_ladder_and_tile_under_round_trips(self) -> None:
+        from spl.ui.pixel import iso
+
+        app = self._fhd_app()
+        # zoom in past the fit floor with successive wheel-up steps at a cursor
+        anchor = app.lay.map_rect.center
+        before = app.lay.sprite_scale
+        app._handle_wheel(+1, anchor)
+        self.assertGreater(app.lay.sprite_scale, before)
+        self.assertEqual(app.factory.scale, app.lay.sprite_scale)
+        self.assertEqual(app.lay.sprite_scale, app.cam_scale)
+        # picking is still exact at the new zoom: the hero tile round-trips from
+        # its own screen centre using the LIVE camera offset/scale.
+        hero = app.sim.hero.pos
+        cx, cy = iso.tile_center(hero.x, hero.y, app.offset_x, app.offset_y,
+                                 app.lay.sprite_scale)
+        picked = app._tile_under(cx, cy)
+        self.assertIsNotNone(picked)
+        self.assertEqual((picked.x, picked.y), (hero.x, hero.y))
+
+    def test_wheel_zoom_in_auto_arms_follow(self) -> None:
+        app = self._fhd_app()
+        self.assertFalse(app.follow)
+        # only meaningful if there's headroom above the fit floor
+        if app._at_fit_scale() and app.fit_scale_val >= max(__import__(
+                "spl.ui.pixel.iso", fromlist=["SPRITE_SCALES"]).SPRITE_SCALES):
+            self.skipTest("window already at max zoom")
+        app._handle_wheel(+1, app.lay.map_rect.center)
+        if not app._at_fit_scale():
+            self.assertTrue(app.follow)
+
+    def test_follow_centres_the_hermit_after_glide(self) -> None:
+        app = self._fhd_app()
+        # zoom in a couple of rungs and enable follow
+        app._handle_wheel(+1, app.lay.map_rect.center)
+        app._handle_wheel(+1, app.lay.map_rect.center)
+        if app._at_fit_scale():
+            self.skipTest("could not zoom past fit floor in this window")
+        app.follow = True
+        app._follow_armed = True
+        # run enough update frames for the lerp to settle
+        for _ in range(120):
+            app._update(1 / 60.0, 0.0)
+        # the hermit's screen centre should be within a few px of the band centre
+        from spl.ui.pixel import iso
+
+        hero = app.sim.hero.pos
+        cx, cy = iso.tile_center(hero.x, hero.y, app.offset_x, app.offset_y,
+                                 app.lay.sprite_scale)
+        band = app.lay.map_rect
+        self.assertLess(abs(cx - band.centerx), 8)
+        # y target is intentionally below centre (bubble headroom); allow slack
+        self.assertLess(abs(cy - (band.centery + int(round(28 * app.lay.sprite_scale)))), 8)
+
+    def test_right_drag_pan_moves_offset_and_disables_follow(self) -> None:
+        app = self._fhd_app()
+        app._handle_wheel(+1, app.lay.map_rect.center)
+        app._handle_wheel(+1, app.lay.map_rect.center)
+        if app._at_fit_scale():
+            self.skipTest("could not zoom past fit floor in this window")
+        app.follow = True
+        ox0, oy0 = app.offset_x, app.offset_y
+        start = app.lay.map_rect.center
+        app._begin_pan(start)
+        self.assertTrue(app.panning)
+        # drag right+down by a chunk
+        app._handle_motion(start[0] + 80, start[1] + 40)
+        app._end_pan()
+        self.assertFalse(app.panning)
+        self.assertFalse(app.follow, "pan must suspend follow")
+        self.assertNotEqual((app.offset_x, app.offset_y), (ox0, oy0))
+
+    def test_zoom_out_clamps_at_fit_scale(self) -> None:
+        app = self._fhd_app()
+        # spam zoom-out well past the floor; it must clamp at the fit scale and
+        # reset to the centred-island view (follow/pan inert there).
+        for _ in range(12):
+            app._handle_wheel(-1, app.lay.map_rect.center)
+        self.assertAlmostEqual(app.lay.sprite_scale, app.fit_scale_val, places=6)
+        self.assertTrue(app._at_fit_scale())
+        cx, cy = app._centered_offsets(app.lay.sprite_scale)
+        self.assertEqual((app.offset_x, app.offset_y), (cx, cy))
+
+    def test_pan_keeps_some_island_visible(self) -> None:
+        app = self._fhd_app()
+        for _ in range(4):
+            app._handle_wheel(+1, app.lay.map_rect.center)
+        if app._at_fit_scale():
+            self.skipTest("could not zoom past fit floor in this window")
+        app.follow = False
+        # try to pan the island far off to one side; the clamp must keep ~25%
+        # of the footprint in the band, so the hero tile stays projectable.
+        for _ in range(60):
+            app._begin_pan(app.lay.map_rect.center)
+            app._handle_motion(app.lay.map_rect.right + 400, app.lay.map_rect.centery)
+            app._end_pan()
+        from spl.ui.pixel import iso
+
+        world = app.sim.world
+        map_w, _ = iso.map_pixel_size(world.width, world.height, app.lay.sprite_scale)
+        min_sx = (0 - (world.height - 1)) * iso.half_w(app.lay.sprite_scale)
+        left = app.offset_x + min_sx
+        # at least a quarter of the island's width remains within the band
+        visible = min(app.lay.map_rect.right, left + map_w) - max(app.lay.map_rect.left, left)
+        self.assertGreaterEqual(visible, int(map_w * 0.2))
+
+    def test_terrain_cache_survives_pan_without_rebuild(self) -> None:
+        # Panning must NOT rebuild terrain (it's baked at origin, blitted at the
+        # camera offset). The signature excludes the offset, so the cached slab
+        # object is reused across a pan.
+        app = self._fhd_app()
+        for _ in range(3):
+            app._handle_wheel(+1, app.lay.map_rect.center)
+        if app._at_fit_scale():
+            self.skipTest("could not zoom past fit floor in this window")
+        slab = app._ensure_terrain()
+        app._begin_pan(app.lay.map_rect.center)
+        app._handle_motion(app.lay.map_rect.centerx + 50, app.lay.map_rect.centery + 30)
+        app._end_pan()
+        self.assertIs(app._ensure_terrain(), slab, "pan should not rebuild terrain")
+
 
 if __name__ == "__main__":
     unittest.main()
