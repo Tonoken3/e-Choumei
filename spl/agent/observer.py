@@ -29,12 +29,19 @@ class ObservationBuilder:
             crop = sim.crop_book.get(plot.crop)
             current = f"Field({crop.name}:{'ready' if plot.ready else str(plot.days_left) + 'd'})"
         alerts = self._alerts(sim)
-        obs: dict[str, object] = {
+        body = self._body_screams(sim)
+        obs: dict[str, object] = {}
+        # 体の声: the flesh interrupts everything — even the watcher's order.
+        # A calm ledger line cannot compete with a long train of thought; a body
+        # can. Present only when a stat turns critical.
+        if body:
+            obs["body"] = body
+        obs.update({
             # The watcher's standing order (作戦). Placed at the TOP on purpose:
             # the watcher SEES THE TRUE WORLD STATE, so this outranks the hermit's
             # own (possibly wrong) beliefs. Persists day after day until changed.
             "strategy_from_heaven": sim.advice_from_heaven,
-        }
+        })
         # ぼうけんのしょ: when past lives left lessons, they sit right below the
         # watcher's order — 前世たちが死をもって書き残した教訓。weigh them like
         # scripture. Omitted entirely when the book is off / empty.
@@ -102,6 +109,23 @@ class ObservationBuilder:
             if pos is not None:
                 out[label] = abs(pos.x - hero.pos.x) + abs(pos.y - hero.pos.y)
         return out
+
+    def _body_screams(self, sim: object) -> list[str]:
+        """体の声 (interoception). When a stat turns critical the world stops
+        whispering "Water is low" and the FLESH screams in imperative Japanese
+        at the very top of the observation. Same body for every cassette —
+        biology, not assistance."""
+        hero = sim.hero
+        screams: list[str] = []
+        if hero.water <= 10:
+            screams.append("喉が灼ける。何を措いても、今すぐ水を飲め。水辺へ歩け。")
+        if hero.hunger <= 10:
+            screams.append("腹の底が抉れる。手にある物を食え。無ければ採りに行け。")
+        if hero.hp <= 25:
+            screams.append("体が壊れかけている。飲み、食い、休め。計画は後だ。")
+        if hero.sanity <= 20:
+            screams.append("心が千切れそうだ。火のそばで休め。")
+        return screams
 
     def _alerts(self, sim: object) -> list[str]:
         hero = sim.hero

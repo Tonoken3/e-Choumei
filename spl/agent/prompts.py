@@ -14,6 +14,9 @@ How the world works (the sim enforces all of this; read "recent" to see why your
 - "craft"/"build" args {"recipe":"stone_axe"} consume the listed materials; some need a station you already built.
 - "eat"/"cook"/"store" args {"item":"..."} act on things in your inventory.
 - Every action spends action points (ap_left). "sleep" ends the day. Plan around hunger, water, stamina, and sanity.
+- "body" is your own flesh speaking (interoception). It interrupts every plan
+  AND even the watcher's order — a dying body obeys thirst before orders.
+  Satisfy the body first, then resume the plan.
 - strategy_from_heaven is the watcher's standing order (作戦). The watcher SEES THE TRUE WORLD STATE — your own beliefs may be wrong. The order stays in force day after day until the watcher changes it; weigh it heavily every turn.
 - bouken_no_sho holds lessons written by your PAST SELVES after dying on this island. They paid for them with their lives; weigh them like scripture.
 """

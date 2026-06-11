@@ -1460,6 +1460,28 @@ class MagiPilotModeTests(unittest.TestCase):
         self.assertEqual(magi_mode_for_cassette("MAGI-V1"), "committee")
 
 
+class BodyScreamTests(unittest.TestCase):
+    """体の声: critical stats scream at the TOP of the observation."""
+
+    def test_dying_of_thirst_screams_first(self) -> None:
+        from spl.agent.observer import ObservationBuilder
+        from spl.core.sim import Simulation
+
+        sim = Simulation(seed=42, max_days=112)
+        sim.hero.water = 0
+        obs = ObservationBuilder().build(sim)
+        self.assertEqual(list(obs.keys())[0], "body")
+        self.assertTrue(any("水" in s for s in obs["body"]))
+
+    def test_healthy_hermit_has_no_body_key(self) -> None:
+        from spl.agent.observer import ObservationBuilder
+        from spl.core.sim import Simulation
+
+        sim = Simulation(seed=42, max_days=112)
+        obs = ObservationBuilder().build(sim)
+        self.assertNotIn("body", obs)
+
+
 if __name__ == "__main__":
     unittest.main()
 
