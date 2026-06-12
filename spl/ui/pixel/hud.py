@@ -922,6 +922,13 @@ class Overlays:
             sim.result_reason or (f.jp("生存中。", "Still alive.") if hero.alive
                                   else f.jp("仙人は果てた。", "The hermit fell.")),
             f"{f.jp('得点', 'Score')}: {sim.score()}",
+        ]
+        # きびしさ: name the island only when it is NOT the canonical ふつう
+        # benchmark (a record run reads clean; やさしい/修羅 is honestly flagged).
+        difficulty = getattr(sim, "difficulty", "ふつう")
+        if difficulty != "ふつう":
+            info.insert(1, f"{f.jp('きびしさ', 'Difficulty')}: {difficulty}")
+        info += [
             f"{f.jp('生存日数', 'Days')}: {hero.days_survived}",
             (f"{f.jp('混乱', 'Confusions')}: {hero.confusion_count}    "
              f"{f.jp('作戦変更', 'Order changes')}: {changes}{f.jp('回', '')}"),
@@ -930,11 +937,12 @@ class Overlays:
             f.jp("銘言ベスト5:", "Best lines:"),
         ]
         # If a 作戦 was standing at the end, show it (truncated) so the 戦績 reads
-        # whether the run was unassisted (0回) or directed.
+        # whether the run was unassisted (0回) or directed. Insert just BEFORE the
+        # blank+「銘言ベスト5」 marker so a きびしさ line above doesn't shift it.
         advice = getattr(sim, "advice_from_heaven", None)
         if advice:
             shown = advice if len(advice) <= 36 else advice[:35] + "…"
-            info.insert(5, f.jp(f"最終作戦:「{shown}」", f"Final order: \"{shown}\""))
+            info.insert(len(info) - 2, f.jp(f"最終作戦:「{shown}」", f"Final order: \"{shown}\""))
         lh = f.body.get_height() + lay.px(3)
         for ln in info:
             surf.blit(_render(f.body, ln, pal.UI_TEXT), (x, y))

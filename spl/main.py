@@ -28,6 +28,7 @@ def build_parser() -> argparse.ArgumentParser:
     pixel = sub.add_parser("pixel", help="play/watch in the isometric pixel-art window (needs pygame)")
     pixel.add_argument("--seed", type=int, default=42)
     pixel.add_argument("--days", type=int, default=112)
+    _add_difficulty(pixel)
     pixel.add_argument("--llm", action="store_true", help="let an OpenAI-compatible cassette play")
     pixel.add_argument("--cassette", default="Qwen仙人", help="cassette name from config/models.toml")
     pixel.add_argument(
@@ -68,6 +69,7 @@ def build_parser() -> argparse.ArgumentParser:
     evolve.add_argument("--lives", type=int, required=True, help="how many lives to run")
     evolve.add_argument("--seed", type=int, default=42)
     evolve.add_argument("--days", type=int, default=112)
+    _add_difficulty(evolve)
     evolve.add_argument("--cassette", default="Qwen仙人vLLM", help="cassette name from config/models.toml")
     evolve.add_argument(
         "--llm",
@@ -107,9 +109,25 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
+DIFFICULTY_CHOICES = ("やさしい", "ふつう", "修羅")
+
+
+def _add_difficulty(parser: argparse.ArgumentParser) -> None:
+    """きびしさ: pick the island's nightly-tax tier. ふつう is the canonical
+    benchmark (record runs use it); やさしい softens the bleed + hands a small
+    starting cache for first-timers; 修羅 sharpens it."""
+    parser.add_argument(
+        "--difficulty",
+        default="ふつう",
+        choices=DIFFICULTY_CHOICES,
+        help="きびしさ: やさしい / ふつう(正典) / 修羅 (default: ふつう)",
+    )
+
+
 def _add_common(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--days", type=int, default=112)
+    _add_difficulty(parser)
     parser.add_argument("--llm", action="store_true", help="use OpenAI-compatible cassette when possible")
     parser.add_argument("--cassette", default="Qwen仙人", help="cassette name from config/models.toml")
     parser.add_argument(
@@ -213,6 +231,7 @@ def run_evolve(args: object) -> int:
         book_dir_cassette=getattr(args, "cassette", None),
         player_persona=player_persona,
         persona_mode=persona_mode,
+        difficulty=getattr(args, "difficulty", "ふつう"),
     )
 
 

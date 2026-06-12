@@ -51,6 +51,7 @@ def _run_one(
         reason=sim.result_reason,
         best_line=best[0] if best else "",
         tier=tier,
+        difficulty=getattr(sim, "difficulty", "ふつう"),
     )
 
 

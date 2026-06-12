@@ -2715,6 +2715,201 @@ class PersonaPresetTests(unittest.TestCase):
         self.assertEqual(brain.player_persona, PERSONA_PRESETS["こわがり"])
 
 
+class DifficultyTests(unittest.TestCase):
+    """きびしさ (difficulty): softer/harsher nightly tax, ふつう = canonical."""
+
+    def test_futsuu_table_byte_matches_previous_constants(self) -> None:
+        # Guard: the ふつう tier must reproduce the exact pre-difficulty numbers,
+        # so the canonical benchmark island (and the 18-day record) never drifts.
+        from spl.core.sim import DEFAULT_DIFFICULTY, DIFFICULTY
+
+        self.assertEqual(DEFAULT_DIFFICULTY, "ふつう")
+        f = DIFFICULTY["ふつう"]
+        self.assertEqual(f["hunger"], -15)
+        self.assertEqual(f["water"], -20)
+        self.assertEqual(f["sanity"], -2)
+        self.assertEqual(f["sanity_house"], -1)
+        self.assertEqual(f["starvation"], -10)
+        self.assertEqual(f["dehydration"], -15)
+        self.assertEqual(f["winter_hp"], -4)
+        self.assertEqual(f["winter_sanity"], -2)
+        self.assertEqual(f["inventory_bonus"], {})
+
+    def test_easy_difficulty_softens_one_end_day(self) -> None:
+        # やさしい: a single nightly decay applies the gentler hunger/water deltas.
+        sim = Simulation(seed=42, max_days=10, difficulty="やさしい")
+        self.assertEqual(sim.difficulty, "やさしい")
+        h0, w0 = sim.hero.hunger, sim.hero.water
+        sim._daily_decay()
+        self.assertEqual(sim.hero.hunger - h0, -10)
+        self.assertEqual(sim.hero.water - w0, -14)
+
+    def test_shura_difficulty_hardens_one_end_day(self) -> None:
+        # 修羅: a single nightly decay applies the harsher hunger/water deltas.
+        sim = Simulation(seed=42, max_days=10, difficulty="修羅")
+        self.assertEqual(sim.difficulty, "修羅")
+        h0, w0 = sim.hero.hunger, sim.hero.water
+        sim._daily_decay()
+        self.assertEqual(sim.hero.hunger - h0, -18)
+        self.assertEqual(sim.hero.water - w0, -24)
+
+    def test_easy_difficulty_grants_start_inventory_bonus(self) -> None:
+        easy = Simulation(seed=42, difficulty="やさしい")
+        norm = Simulation(seed=42, difficulty="ふつう")
+        self.assertEqual(easy.hero.inventory["berries"], norm.hero.inventory["berries"] + 3)
+        self.assertEqual(easy.hero.inventory["wood"], norm.hero.inventory["wood"] + 2)
+
+    def test_starvation_dehydration_bleed_scales_with_difficulty(self) -> None:
+        # The HP bleed at hunger/water 0 follows the table (and logs the magnitude).
+        for diff, starve, dehydrate in (("やさしい", -7, -10), ("ふつう", -10, -15), ("修羅", -12, -18)):
+            sim = Simulation(seed=3, max_days=10, difficulty=diff)
+            sim.hero.hunger = 0
+            sim.hero.water = 0
+            hp0 = sim.hero.hp
+            sim._daily_decay()
+            # both bleeds stack onto the same night
+            self.assertEqual(sim.hero.hp - hp0, starve + dehydrate, diff)
+            self.assertTrue(any(f"HP {starve}." in ln for ln in sim.full_log), diff)
+            self.assertTrue(any(f"HP {dehydrate}." in ln for ln in sim.full_log), diff)
+
+    def test_unknown_and_default_difficulty_fall_back_to_futsuu(self) -> None:
+        self.assertEqual(Simulation(seed=1).difficulty, "ふつう")
+        self.assertEqual(Simulation(seed=1, difficulty="激辛").difficulty, "ふつう")
+
+    def test_default_run_matches_pre_change_behaviour_and_defaults_futsuu(self) -> None:
+        # The existing determinism test proves same-seed reproduction; here we
+        # assert explicitly that the DEFAULT difficulty is ふつう and that an
+        # explicit ふつう reproduces the bare-default run byte-for-byte.
+        bare = run_local(seed=45, days=30)
+        explicit = Simulation(seed=45, max_days=30, difficulty="ふつう")
+        agent = LocalPolicyAgent()
+        for _ in range(30 * 60):
+            if explicit.done:
+                break
+            explicit.step(agent.choose(explicit))
+        self.assertEqual(bare.difficulty, "ふつう")
+        self.assertEqual(bare.full_log, explicit.full_log)
+        self.assertEqual(bare.score(), explicit.score())
+
+    def test_difficulty_does_not_consume_rng(self) -> None:
+        # きびしさ must scale fixed deltas only — never DRAW from the RNG. Drive two
+        # sims (やさしい vs 修羅) with the SAME fixed action each turn so the hero
+        # behaves identically; the RNG-driven world stream (weather transitions,
+        # merchant arrivals, dog raids, storm damage) must then be byte-identical.
+        # RNG-driven world events only: day/weather rolls, merchants, dog raids,
+        # storm damage. NOT hero actions (identical here) and NOT the death line
+        # (which legitimately fires sooner on the harsher tier).
+        markers = ("begins:", "Merchant arrives", "Wild dogs", "Storm damage", "行商人")
+
+        def world_stream(diff: str) -> tuple[list, list]:
+            sim = Simulation(seed=7, max_days=14, difficulty=diff)
+            weathers: list[str] = []
+            for _ in range(14 * 12 + 20):
+                if sim.done:
+                    break
+                sim.step(GameAction(action="rest"))  # same fixed action every turn
+                weathers.append(sim.world.weather)
+            events = [ln.split(": ", 1)[-1] for ln in sim.full_log
+                      if any(m in ln for m in markers)]
+            return weathers, events
+
+        w_easy, e_easy = world_stream("やさしい")
+        w_shura, e_shura = world_stream("修羅")
+        # 修羅 dies sooner, so its streams are a PREFIX of やさしい's — the RNG draw
+        # order over the shared survival span must match exactly (difficulty never
+        # draws; it only scales the tax that decides WHEN the prefix ends).
+        n_w = min(len(w_easy), len(w_shura))
+        n_e = min(len(e_easy), len(e_shura))
+        self.assertGreater(n_e, 5, "streams too short to be a meaningful RNG check")
+        self.assertEqual(w_easy[:n_w], w_shura[:n_w], "difficulty perturbed the weather RNG stream")
+        self.assertEqual(e_easy[:n_e], e_shura[:n_e], "difficulty perturbed the RNG-driven world events")
+
+    def test_settlers_briefing_tells_the_truth_per_difficulty(self) -> None:
+        from spl.agent.prompts import settlers_briefing
+
+        easy = settlers_briefing("やさしい")
+        self.assertIn("hunger -10, water -14", easy)
+        self.assertIn("bleed 7 HP", easy)
+        self.assertIn("bleed 10 HP", easy)
+        self.assertIn("-2 HP and -1 sanity", easy)
+
+        shura = settlers_briefing("修羅")
+        self.assertIn("hunger -18, water -24", shura)
+        self.assertIn("bleed 12 HP", shura)
+        self.assertIn("bleed 18 HP", shura)
+        self.assertIn("-6 HP and -3 sanity", shura)
+
+    def test_system_prompt_futsuu_is_byte_identical_default(self) -> None:
+        # The module default SYSTEM_PROMPT must carry the ふつう briefing numbers
+        # (back-compat for the existing prompt tests).
+        from spl.agent.prompts import SYSTEM_PROMPT, system_prompt_for_difficulty
+
+        self.assertIn("hunger -15, water -20", SYSTEM_PROMPT)
+        self.assertIn("bleed 10 HP", SYSTEM_PROMPT)
+        self.assertIn("bleed 15 HP", SYSTEM_PROMPT)
+        self.assertEqual(SYSTEM_PROMPT, system_prompt_for_difficulty("ふつう"))
+
+    def test_brain_action_system_message_carries_difficulty_numbers(self) -> None:
+        # The brain's action system message (built from the sim) must contain the
+        # difficulty-correct briefing — no server contact (system_prompt_for is a
+        # pure string build over the stub cassette).
+        from spl.agent.llm_client import Cassette, OpenAICompatibleBrain
+
+        brain = OpenAICompatibleBrain(Cassette(name="x", base_url="http://stub/v1"))
+        shura = Simulation(seed=42, max_days=10, difficulty="修羅")
+        msg = brain.system_prompt_for(shura)
+        self.assertIn("hunger -18, water -24", msg)
+        self.assertIn("bleed 12 HP", msg)
+        # a ふつう sim yields the canonical numbers from the same call
+        normal = Simulation(seed=42, max_days=10, difficulty="ふつう")
+        self.assertIn("hunger -15, water -20", brain.system_prompt_for(normal))
+
+    def test_build_entry_records_difficulty(self) -> None:
+        from spl.agent.bouken import build_entry
+
+        sim = Simulation(seed=42, max_days=10, difficulty="修羅")
+        entry = build_entry(sim, 42, {"motto": "x", "lessons": ["a", "b", "c"]})
+        self.assertEqual(entry["difficulty"], "修羅")
+        norm = build_entry(Simulation(seed=42, max_days=10), 42, {})
+        self.assertEqual(norm["difficulty"], "ふつう")
+
+    def test_simulate_difficulty_flag_wires_into_the_sim(self) -> None:
+        from types import SimpleNamespace
+
+        from spl.ui import cli
+
+        args = SimpleNamespace(
+            seed=42, days=6, llm=False, cassette=None, strategy=None, tps=0,
+            difficulty="やさしい",
+        )
+        captured: dict[str, object] = {}
+        orig = cli.print_result
+
+        def _spy(sim, motto=None, **kw):  # noqa: ANN001
+            captured["difficulty"] = sim.difficulty
+            captured["berries"] = sim.hero.inventory.get("berries", 0)
+
+        cli.print_result = _spy
+        try:
+            cli.run_simulate(args)
+        finally:
+            cli.print_result = orig
+        self.assertEqual(captured["difficulty"], "やさしい")
+
+    def test_difficulty_parser_choices(self) -> None:
+        from spl.main import build_parser
+
+        parser = build_parser()
+        for sub in ("play", "simulate", "pixel"):
+            ns = parser.parse_args([sub, "--difficulty", "修羅"])
+            self.assertEqual(ns.difficulty, "修羅")
+        # default is ふつう on simulate
+        self.assertEqual(parser.parse_args(["simulate"]).difficulty, "ふつう")
+        # an unknown choice is rejected by argparse
+        with self.assertRaises(SystemExit):
+            parser.parse_args(["simulate", "--difficulty", "激辛"])
+
+
 if __name__ == "__main__":
     unittest.main()
 

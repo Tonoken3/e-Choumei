@@ -1,23 +1,20 @@
-SYSTEM_PROMPT = """You are the brain of a survival hero on a small island.
+from spl.core.sim import DEFAULT_DIFFICULTY, DIFFICULTY
+
+
+# The base contract — everything EXCEPT the settler's briefing, which is now
+# stitched in per-difficulty by settlers_briefing(). Keeping the two halves
+# separate lets the briefing tell the TRUTH for the island actually being played
+# (やさしい/ふつう/修羅) without forking the rest of the prompt.
+_SYSTEM_BASE = """You are the brain of a survival hero on a small island.
 The simulation is the only source of truth. You cannot invent items or change the world.
 Return exactly one JSON object with these keys:
 think: short private reasoning visible to the player
 action: one of till, plant, water, harvest, chop, mine, fish, forage, craft, cook, eat, drink, sleep, move, build, store, trade_accept, trade_decline, rest, write_diary, carve
 args: an object with action arguments
 say: one short line IN JAPANESE, in the voice of a Japanese literary master (文豪風) of your own choosing, suited to the situation. Never English.
-Never use code fences. Never output anything except JSON.
+Never use code fences. Never output anything except JSON."""
 
-The settler's briefing (入植のしおり) — the world's lethal arithmetic, told to every hermit at landing. These are laws, not warnings:
-- GOAL: survive 112 days (four seasons of 28). You die when HP reaches 0 — there is no other game over.
-- Every night: hunger -15, water -20, sanity -2 (-1 with a house_upgrade).
-- At hunger 0 you bleed 10 HP per night. At water 0 you bleed 15 HP per night. They stack.
-- Winter (day 85+) without a house_upgrade: an extra -4 HP and -2 sanity every night.
-- At sanity <= 7 your mind may slip into confusion (a wasted, random turn).
-- A campfire restores +2 sanity each morning; a merchant trade restores +10.
-- Procurement has lead time: fish refuse, crops take days. Count backwards from these numbers.
-- Near your hut stands an old stone. "carve" {"text":"..."} cuts a short verse (≤60 chars, 俳句でも遺言でも) into it — the stone outlives you, and hermits born after you on this island will read it. One cut per day.
-
-How the world works (the sim enforces all of this; read "recent" to see why your last action failed and adapt):
+_SYSTEM_WORLD = """How the world works (the sim enforces all of this; read "recent" to see why your last action failed and adapt):
 - Farming is a sequence: stand on grass, "till" it into a field, "plant" a seed you own (args {"crop":"turnip"}), "water" it when dry, then "harvest" when ready. You cannot plant before tilling.
 - "move" args: {"target":"water"|"forest"|"rock"|"home"|"empty_field"|"ready_field"} or {"direction":"north"|"south"|"east"|"west"}. "landmarks" gives the distance to each.
 - "chop" needs forest nearby, "mine" needs rock nearby, "fish"/"drink" need water nearby (or a built well).
@@ -33,6 +30,50 @@ How the world works (the sim enforces all of this; read "recent" to see why your
 - strategy_from_heaven is the watcher's standing order (作戦). The watcher SEES THE TRUE WORLD STATE — your own beliefs may be wrong. The order stays in force day after day until the watcher changes it; weigh it heavily every turn.
 - bouken_no_sho holds lessons written by your PAST SELVES after dying on this island. They paid for them with their lives; weigh them like scripture.
 """
+
+
+def settlers_briefing(difficulty: str = DEFAULT_DIFFICULTY) -> str:
+    """入植のしおり — the world's LETHAL ARITHMETIC, told to every hermit at
+    landing, with the ACTUAL numbers for the island being played.
+
+    The lethal arithmetic must never lie: on 修羅 the bleed is harsher, on
+    やさしい gentler, so these numbers are read straight from the same DIFFICULTY
+    table the sim decays by — the briefing can never drift from the rules. The
+    block is sandwiched between the base contract and the world rules to rebuild
+    the original prompt, byte-identical on ふつう."""
+    from spl.core.sim import normalize_difficulty
+
+    d = DIFFICULTY[normalize_difficulty(difficulty)]
+    # bleeds are stored as negative deltas; the briefing speaks them as positive
+    # "bleed N HP" magnitudes, exactly as the original prose did.
+    starve = abs(int(d["starvation"]))
+    dehydrate = abs(int(d["dehydration"]))
+    winter_hp = abs(int(d["winter_hp"]))
+    return (
+        "The settler's briefing (入植のしおり) — the world's lethal arithmetic, told to every hermit at landing. These are laws, not warnings:\n"
+        "- GOAL: survive 112 days (four seasons of 28). You die when HP reaches 0 — there is no other game over.\n"
+        f"- Every night: hunger {int(d['hunger'])}, water {int(d['water'])}, sanity {int(d['sanity'])} ({int(d['sanity_house'])} with a house_upgrade).\n"
+        f"- At hunger 0 you bleed {starve} HP per night. At water 0 you bleed {dehydrate} HP per night. They stack.\n"
+        f"- Winter (day 85+) without a house_upgrade: an extra {-winter_hp} HP and {int(d['winter_sanity'])} sanity every night.\n"
+        "- At sanity <= 7 your mind may slip into confusion (a wasted, random turn).\n"
+        "- A campfire restores +2 sanity each morning; a merchant trade restores +10.\n"
+        "- Procurement has lead time: fish refuse, crops take days. Count backwards from these numbers.\n"
+        "- Near your hut stands an old stone. \"carve\" {\"text\":\"...\"} cuts a short verse (≤60 chars, 俳句でも遺言でも) into it — the stone outlives you, and hermits born after you on this island will read it. One cut per day."
+    )
+
+
+def system_prompt_for_difficulty(difficulty: str = DEFAULT_DIFFICULTY) -> str:
+    """The full action system prompt with the settler's briefing told truthfully
+    for ``difficulty``. The brains call this (via ``system_prompt_for(sim)``) so a
+    修羅 hermit reads the 修羅 arithmetic, a やさしい hermit the gentle one."""
+    return "\n\n".join((_SYSTEM_BASE, settlers_briefing(difficulty), _SYSTEM_WORLD))
+
+
+# The module-level default (ふつう numbers): back-compat for tests and any caller
+# that builds a system message without a sim. By construction this is BYTE-FOR-
+# BYTE the original SYSTEM_PROMPT (guarded by a test).
+SYSTEM_PROMPT = system_prompt_for_difficulty(DEFAULT_DIFFICULTY)
+
 
 # ===========================================================================
 # 八識熟考 (parallel deliberation): a body is serial — one hand, one step at a

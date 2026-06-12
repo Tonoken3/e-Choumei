@@ -135,7 +135,11 @@ class PixelApp:
         pygame.init()
         self.headless = headless
         self.args = args
-        self.sim = Simulation(seed=getattr(args, "seed", 42), max_days=getattr(args, "days", 112))
+        self.sim = Simulation(
+            seed=getattr(args, "seed", 42),
+            max_days=getattr(args, "days", 112),
+            difficulty=getattr(args, "difficulty", "ふつう"),
+        )
         # --strategy seeds the initial standing 作戦 before the run begins.
         strategy = getattr(args, "strategy", None)
         if strategy:
@@ -718,6 +722,7 @@ class PixelApp:
         self.sim = Simulation(
             seed=getattr(self.args, "seed", 42),
             max_days=getattr(self.args, "days", 112),
+            difficulty=getattr(self.args, "difficulty", "ふつう"),
         )
         strategy = getattr(self.args, "strategy", None)
         if strategy:

@@ -276,6 +276,9 @@ def build_entry(sim: object, seed: int, motto: dict | None,
         "lessons": lessons,
         "motto": str(motto.get("motto", "")).strip(),
         "persona": (str(player_persona or "").strip())[:120],
+        # きびしさ: which island this life was lived on (the 18-day record stays
+        # ふつう-canonical, so the book reads which runs are comparable).
+        "difficulty": getattr(sim, "difficulty", "ふつう"),
     }
 
 

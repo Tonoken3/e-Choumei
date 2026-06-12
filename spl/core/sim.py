@@ -20,6 +20,67 @@ from .world import SEASON_NAMES, WEATHER_NAMES, World
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 
+# ===========================================================================
+# きびしさ (difficulty) — DQの「さくせん」ならぬ難易度。The island's nightly tax is
+# tuned BRUTALLY (every hermit dies within ~19 days) on the canonical ふつう
+# benchmark island. やさしい softens the bleed and hands a small starting cache
+# so a first-time human player (no LLM) can learn the ropes; 修羅 sharpens it.
+#
+# Every number a difficulty touches lives HERE — _daily_decay reads from this
+# table, never from scattered literals. ふつう is the canonical benchmark and its
+# values BYTE-MATCH the pre-difficulty constants (guarded by a test): the 18-day
+# record and all leaderboards stay ふつう-canonical.
+#
+# Determinism: difficulty NEVER consumes the RNG — it only scales fixed deltas —
+# so (seed, difficulty) reproduces identically, and ふつう reproduces the exact
+# pre-change run. ``inventory_bonus`` is added to the configured start_inventory.
+# ===========================================================================
+DEFAULT_DIFFICULTY = "ふつう"
+
+DIFFICULTY: dict[str, dict[str, object]] = {
+    "やさしい": {
+        "hunger": -10,
+        "water": -14,
+        "sanity": -2,            # base nightly sanity (house_upgrade halves to -1)
+        "sanity_house": -1,
+        "starvation": -7,        # HP bleed at hunger 0
+        "dehydration": -10,      # HP bleed at water 0
+        "winter_hp": -2,         # extra winter tax without a house_upgrade
+        "winter_sanity": -1,
+        "inventory_bonus": {"berries": 3, "wood": 2},
+    },
+    "ふつう": {  # EXACTLY the pre-difficulty constants — the canonical benchmark.
+        "hunger": -15,
+        "water": -20,
+        "sanity": -2,
+        "sanity_house": -1,
+        "starvation": -10,
+        "dehydration": -15,
+        "winter_hp": -4,
+        "winter_sanity": -2,
+        "inventory_bonus": {},
+    },
+    "修羅": {
+        "hunger": -18,
+        "water": -24,
+        "sanity": -2,
+        "sanity_house": -1,
+        "starvation": -12,
+        "dehydration": -18,
+        "winter_hp": -6,
+        "winter_sanity": -3,
+        "inventory_bonus": {},
+    },
+}
+
+
+def normalize_difficulty(name: str | None) -> str:
+    """Map an arbitrary string to a known きびしさ, defaulting to ふつう (the
+    canonical benchmark) for None / unknown values so a bad flag never crashes a
+    run — it simply plays the standard island."""
+    return name if name in DIFFICULTY else DEFAULT_DIFFICULTY
+
+
 # The "混乱" voice (spec §4.3): a small pool of disoriented lines so a confused
 # hermit — the lovable, struggling small model — does not repeat one stock line.
 CONFUSION_LINES = (
@@ -41,9 +102,15 @@ class Simulation:
         max_days: int | None = None,
         game_config: Path | None = None,
         data_dir: Path | None = None,
+        difficulty: str = DEFAULT_DIFFICULTY,
     ) -> None:
         self.seed = seed
         self.rng = GameRng(seed)
+        # きびしさ: the nightly-tax tier. Normalized so an unknown value plays the
+        # canonical ふつう island. The decay numbers all come from DIFFICULTY[...]
+        # so the same (seed, difficulty) reproduces identically.
+        self.difficulty = normalize_difficulty(difficulty)
+        self.decay = DIFFICULTY[self.difficulty]
         self.data_dir = data_dir or PROJECT_ROOT / "data"
         self.config_path = game_config or PROJECT_ROOT / "config" / "game.toml"
         self.config = self._load_config(self.config_path)
@@ -68,7 +135,7 @@ class Simulation:
             stamina=int(hero_cfg.get("stamina", 92)),
             sanity=int(hero_cfg.get("sanity", 85)),
             ap_left=self.ap_per_day,
-            inventory=dict(self.config.get("start_inventory", {})),
+            inventory=self._start_inventory(),
         )
         self.engine = ActionEngine()
         self.memory = Memory()
@@ -330,23 +397,42 @@ class Simulation:
         return f"{amount} {item}"
 
     def _daily_decay(self) -> None:
+        # きびしさ: every nightly tax that a difficulty touches is read from the
+        # DIFFICULTY table (self.decay). round() keeps integer stats even if a
+        # future tier uses fractional multipliers. Weather taxes (storm sanity,
+        # snow stamina) are island physics, not difficulty knobs — left as-is.
         hero = self.hero
-        hero.adjust("hunger", -15)
-        hero.adjust("water", -20)
-        hero.adjust("sanity", -1 if hero.has("house_upgrade") else -2)
+        d = self.decay
+        hero.adjust("hunger", round(d["hunger"]))
+        hero.adjust("water", round(d["water"]))
+        hero.adjust("sanity", round(d["sanity_house"] if hero.has("house_upgrade") else d["sanity"]))
         if self.world.weather == "storm":
             hero.adjust("sanity", -3)
         if self.world.weather == "snow":
             hero.adjust("stamina", -4)
         if self.world.season == "winter" and not hero.has("house_upgrade"):
-            hero.adjust("hp", -4)
-            hero.adjust("sanity", -2)
+            hero.adjust("hp", round(d["winter_hp"]))
+            hero.adjust("sanity", round(d["winter_sanity"]))
         if hero.hunger <= 0:
-            hero.adjust("hp", -10)
-            self.log("Starvation bites. HP -10.")
+            bleed = round(d["starvation"])
+            hero.adjust("hp", bleed)
+            self.log(f"Starvation bites. HP {bleed}.")
         if hero.water <= 0:
-            hero.adjust("hp", -15)
-            self.log("Dehydration bites. HP -15.")
+            bleed = round(d["dehydration"])
+            hero.adjust("hp", bleed)
+            self.log(f"Dehydration bites. HP {bleed}.")
+
+    def _start_inventory(self) -> dict[str, int]:
+        """The hermit's opening cache: the configured start_inventory plus the
+        difficulty's ``inventory_bonus`` (やさしい hands a few berries+wood so a
+        first-timer is not starving on day 1; ふつう/修羅 add nothing, so the
+        canonical island is untouched)."""
+        inv: dict[str, int] = {
+            str(k): int(v) for k, v in self.config.get("start_inventory", {}).items()
+        }
+        for item, amount in self.decay.get("inventory_bonus", {}).items():
+            inv[item] = inv.get(item, 0) + int(amount)
+        return inv
 
     def _load_config(self, path: Path) -> dict[str, object]:
         if not path.exists():

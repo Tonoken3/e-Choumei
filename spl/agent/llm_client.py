@@ -25,6 +25,7 @@ from .prompts import (
     VERIFY_PROMPT,
     lens_prompt,
     lenses_for,
+    system_prompt_for_difficulty,
 )
 from .schema import (
     ActionParseError,
@@ -409,6 +410,15 @@ class OpenAICompatibleBrain:
                 parts.append(self.cassette.persona)
         return "\n".join(parts)
 
+    def system_prompt_for(self, sim: object) -> str:
+        """The full action system message for THIS run — with the settler's
+        briefing told truthfully for the sim's きびしさ (so a 修羅 hermit reads the
+        修羅 arithmetic). Falls back to the ふつう SYSTEM_PROMPT when the sim has no
+        difficulty (older fakes / a None sim), so back-compat holds."""
+        difficulty = getattr(sim, "difficulty", None)
+        base = system_prompt_for_difficulty(difficulty) if difficulty else SYSTEM_PROMPT
+        return self.system_for(base)
+
     def avg_tps(self) -> float:
         """Rolling average TPS over the last calls. Forced TPS overrides it.
         Until 2 real samples exist, fall back to the 行者 default (80)."""
@@ -472,7 +482,8 @@ class OpenAICompatibleBrain:
         self.tier_history.append(budget.name)
         obs = self.observer.build(sim)
         messages = [
-            {"role": "system", "content": self.system_for(SYSTEM_PROMPT)},
+            # きびしさ: the briefing numbers match the island actually being played.
+            {"role": "system", "content": self.system_prompt_for(sim)},
             {"role": "user", "content": json.dumps(obs, ensure_ascii=False)},
         ]
         if extra:
@@ -615,7 +626,7 @@ class OpenAICompatibleBrain:
         # 阿頼耶識: one schema-forced action with the observation + the N counsels.
         counsel_block = "\n".join(f"【{lens}】{text}" for lens, text in counsels)
         messages = [
-            {"role": "system", "content": self.system_for(SYSTEM_PROMPT)},
+            {"role": "system", "content": self.system_prompt_for(sim)},
             {"role": "user", "content": obs_json},
             {
                 "role": "user",

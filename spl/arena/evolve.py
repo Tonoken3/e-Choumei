@@ -93,6 +93,7 @@ def run_evolve(
     book_dir_cassette: str | None = None,
     player_persona: str | None = None,
     persona_mode: str = "append",
+    difficulty: str = "ふつう",
 ) -> int:
     """Run ``lives`` lives, revising the 家訓 after each. Returns 0 always (the
     lineage is resilient: a dead life is logged and the next is born)."""
@@ -135,7 +136,7 @@ def run_evolve(
 
     for n in range(1, lives + 1):
         try:
-            sim = Simulation(seed=seed, max_days=days)
+            sim = Simulation(seed=seed, max_days=days, difficulty=difficulty)
             # This life inherits the current canon (canon wins in lessons_for).
             if brain is not None:
                 inject_into_observer(getattr(brain, "observer", None), book, seed)

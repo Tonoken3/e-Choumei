@@ -13,6 +13,10 @@ class ArenaResult:
     reason: str
     best_line: str = ""
     tier: str = ""  # 思考予算 tier the LLM brain ran at (empty for local)
+    # きびしさ: the island this run was lived on. Arena always pits cassettes on
+    # the canonical ふつう benchmark (no --difficulty there), so this stays ふつう;
+    # the column is omitted from render_leaderboard to keep the row width bounded.
+    difficulty: str = "ふつう"
 
 
 def select_meigen(lines: list[str], n: int = 5) -> list[str]:
