@@ -268,6 +268,8 @@ python3 -m spl simulate --llm --tps 1000 --seed 42 --days 6   # 仙界: 深く�
 
 条件ゲートは健在: 飢えた精神も八識は走らせますが、統合呼び出しは通常の条件上限ティアを通ります（八つに散らせても、まとめは満腹の上に立つ）。`config/models.toml` の `parallel = N`（0=off）で有効化。同梱の `Qwen仙人vLLM`（`:8011`）は `parallel = 8`。
 
+`parallel` はサービングスタックの並列スロット数に合わせる: **LMSは既定並列4 → `parallel = 4` で四識熟考**（先頭の生存核 水/食/住/危険）、**vLLMは8**（continuous batching が8並列を難なく捌く）。`parallel > 1` は仙界ティアの複数候補（candidates）も並列で発行するので、二案目がほぼ実時間ゼロで手に入る。
+
 ```bash
 python3 -m spl pixel    --llm --cassette Qwen仙人vLLM              # [熟考]ボタン(G)で八識を切替
 python3 -m spl pixel    --llm --cassette Qwen仙人vLLM --deliberate # 最初から熟考ONで観戦

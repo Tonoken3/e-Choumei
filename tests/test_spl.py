@@ -1,6 +1,11 @@
 from __future__ import annotations
 
+import threading
+import time
 import unittest
+import unittest.mock
+from collections import deque
+from concurrent.futures import Future
 
 from spl.agent.policy import LocalPolicyAgent
 from spl.agent.schema import ActionParseError, parse_action_text
@@ -1554,8 +1559,8 @@ class HasshikiDeliberationTests(unittest.TestCase):
         path = PROJECT_ROOT / "config" / "models.toml"
         vllm = find_cassette(path, "Qwen仙人vLLM")
         self.assertEqual(vllm.parallel, 8)
-        # a cassette without the key defaults to 0 (off).
-        self.assertEqual(find_cassette(path, "Qwen仙人").parallel, 0)
+        # a cassette without the key defaults to 0 (off): the bundled local policy.
+        self.assertEqual(find_cassette(path, "Local仙人").parallel, 0)
 
     def test_lenses_for_uses_first_n_and_cycles_above_eight(self) -> None:
         from spl.agent.prompts import EIGHT_LENSES, lenses_for
@@ -2174,6 +2179,204 @@ class ReasoningNoCountTests(unittest.TestCase):
         self.assertEqual(brain._completion_cap(tier_for_tps(50)), 384)
         brain2 = self._brain(reasoning=False, max_tokens=1792)
         self.assertEqual(brain2._completion_cap(tier_for_tps(50)), 1792)
+
+
+class _SerialExecutor:
+    """A drop-in for ThreadPoolExecutor that runs submitted work IMMEDIATELY on the
+    calling thread, in submission order, returning an already-resolved future. Used
+    to make the concurrent-candidate reassembly DETERMINISTIC under test: each
+    _propose runs in the exact order choose() submits it, so result index 0 is
+    pinned to the first scripted value. (Concurrency itself is proven separately by
+    the real-thread overlap test.)"""
+
+    def __init__(self, *a, **kw):
+        pass
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *a):
+        return False
+
+    def submit(self, fn, *args, **kwargs):
+        fut: Future = Future()
+        try:
+            fut.set_result(fn(*args, **kwargs))
+        except BaseException as exc:  # noqa: BLE001 - mirror executor semantics
+            fut.set_exception(exc)
+        return fut
+
+
+def _serial_executor_patch():
+    import spl.agent.llm_client as _mod
+
+    return unittest.mock.patch.object(_mod, "ThreadPoolExecutor", _SerialExecutor)
+
+
+class _CandidateStubBrain:
+    """An OpenAICompatibleBrain whose ONLY network seam (_post_chat) is mocked, to
+    exercise choose()'s candidate generation. Each proposal call returns a DISTINCT
+    valid action keyed by the order the calls START (so the first-index successful
+    proposal can be identified), and records the start order + thread id of every
+    call so concurrency can be proven without any live request."""
+
+    @staticmethod
+    def make(parallel: int, tps: float = 500.0, actions=("forage", "rest", "drink")):
+        from spl.agent.llm_client import Cassette, OpenAICompatibleBrain
+
+        class _Brain(OpenAICompatibleBrain):
+            def __init__(self):
+                super().__init__(Cassette(
+                    name="cand", base_url="http://stub/v1", parallel=parallel, tps=tps,
+                ))
+                self._lock = threading.Lock()
+                self.start_order: list[int] = []   # call index in the order calls START
+                self.threads: set[int] = set()     # distinct thread ids seen
+                self.max_concurrent = 0
+                self._inflight = 0
+
+            def _resolve_model(self):
+                return "stub-model"
+
+            def _post_chat(self, payload):
+                import json as _json
+
+                from spl.agent.prompts import VERIFY_PROMPT
+
+                system = payload["messages"][0]["content"]
+                # The VERIFY pass (羅漢+) is a second thought, not a candidate. Echo
+                # the FIRST proposal it was handed back UNCHANGED (a verify that
+                # makes no correction), so it never perturbs the candidate
+                # determinism/concurrency this stub is measuring.
+                if system.startswith(VERIFY_PROMPT):
+                    blob = _json.loads(payload["messages"][1]["content"])
+                    first = blob["proposals"][0]
+                    body = _json.dumps(
+                        {"think": "verify", "action": first["action"],
+                         "args": first.get("args", {}), "say": "案"},
+                        ensure_ascii=False,
+                    )
+                    return body, 10
+
+                with self._lock:
+                    n = len(self.start_order)
+                    self.start_order.append(n)
+                    self.threads.add(threading.get_ident())
+                    self._inflight += 1
+                    self.max_concurrent = max(self.max_concurrent, self._inflight)
+                # Earlier-starting calls take LONGER: if the calls were sequential
+                # the slow first call would have to finish before the second began,
+                # so observing 2 in-flight at once proves they did not wait.
+                time.sleep(0.05 if n == 0 else 0.005)
+                with self._lock:
+                    self._inflight -= 1
+                action = actions[n % len(actions)]
+                body = _json.dumps(
+                    {"think": f"c{n}", "action": action, "args": {}, "say": "案"},
+                    ensure_ascii=False,
+                )
+                return body, 20
+
+        return _Brain()
+
+
+class ConcurrentCandidateTests(unittest.TestCase):
+    """仙界 multi-candidate: parallel cassettes issue the proposals concurrently;
+    a single-slot cassette stays strictly sequential. Mock transport, no live."""
+
+    def _sim(self):
+        return Simulation(seed=42, max_days=112)
+
+    def test_candidates_issued_concurrently_when_parallel(self) -> None:
+        # 仙界 (tps 500 → 2 candidates) + parallel=4 → both proposals in flight.
+        # All candidates return the same action here; this test isolates the
+        # CONCURRENCY claim (overlap), determinism is proven separately below.
+        brain = _CandidateStubBrain.make(parallel=4, tps=500.0, actions=("forage",))
+        self.assertEqual(brain.current_tier().candidates, 2)
+        action = brain.choose(self._sim())
+        # exactly two proposal calls went out, on two distinct threads, overlapping
+        # — if they had been issued sequentially the slow first call would have had
+        # to FINISH before the second began, so max_concurrent could never reach 2.
+        self.assertEqual(len(brain.start_order), 2)
+        self.assertEqual(len(brain.threads), 2)
+        self.assertEqual(brain.max_concurrent, 2, "candidates did not overlap")
+        self.assertEqual(action.action, "forage")
+
+    def test_first_index_proposal_is_preferred_deterministically(self) -> None:
+        # Determinism: choose() reassembles results IN SUBMISSION INDEX ORDER
+        # (results[i] = fut.result()), so the FIRST-index proposal is the one
+        # returned even when a later submission's value would differ. With the
+        # executor patched to a serial, submission-order runner, each _propose call
+        # consumes the next scripted result in submission order — index 0 ("forage")
+        # then index 1 ("rest") — and choose() must prefer index 0.
+        brain = _CandidateStubBrain.make(parallel=4, tps=500.0)
+        self.assertEqual(brain.current_tier().candidates, 2)
+        scripted = deque([("forage", None), ("rest", None)])
+
+        def _scripted_propose(messages, budget):
+            verb, _ = scripted.popleft()
+            return GameAction(action=verb, args={}, think="s", say="案")
+
+        brain._propose = _scripted_propose
+        with _serial_executor_patch():
+            action = brain.choose(self._sim())
+        self.assertEqual(action.action, "forage")  # first submission index wins
+
+    def test_concurrent_path_skips_failing_proposal_and_returns_valid(self) -> None:
+        # A candidate that will not parse is skipped; as long as one valid proposal
+        # exists the turn still acts (never invalid_llm_output).
+        brain = _CandidateStubBrain.make(parallel=4, tps=500.0)
+        scripted = deque([("__raise__", None), ("rest", None)])
+
+        def _scripted_propose(messages, budget):
+            verb, _ = scripted.popleft()
+            if verb == "__raise__":
+                raise ActionParseError("bad json")
+            return GameAction(action=verb, args={}, think="s", say="案")
+
+        brain._propose = _scripted_propose
+        with _serial_executor_patch():
+            action = brain.choose(self._sim())
+        self.assertEqual(action.action, "rest")  # the one valid proposal survived
+        self.assertNotEqual(action.action, "invalid_llm_output")
+
+    def test_candidates_sequential_when_no_parallel_slots(self) -> None:
+        # 仙界 wants 2 candidates but parallel<=1 → no executor, strictly serial.
+        brain = _CandidateStubBrain.make(parallel=1, tps=500.0)
+        self.assertEqual(brain.current_tier().candidates, 2)
+        action = brain.choose(self._sim())
+        self.assertEqual(len(brain.start_order), 2)
+        # both calls ran on the SAME thread (the caller's), never overlapping.
+        self.assertEqual(len(brain.threads), 1)
+        self.assertEqual(brain.max_concurrent, 1, "sequential path must not overlap")
+        self.assertEqual(action.action, "forage")  # first-index still preferred
+
+    def test_single_candidate_tier_never_uses_executor(self) -> None:
+        # 行者 (tps 80 → 1 candidate) with parallel=4 → one call, no fan-out.
+        brain = _CandidateStubBrain.make(parallel=4, tps=80.0)
+        self.assertEqual(brain.current_tier().candidates, 1)
+        # 行者 has no verify pass, so choose() returns the lone proposal directly.
+        action = brain.choose(self._sim())
+        self.assertEqual(len(brain.start_order), 1)
+        self.assertEqual(len(brain.threads), 1)
+        self.assertEqual(action.action, "forage")
+
+    def test_lenses_for_four_is_the_survival_core(self) -> None:
+        # parallel=4 (LM Studio default) → the first four lenses: 水/食/住/危険.
+        from spl.agent.prompts import lenses_for
+
+        self.assertEqual([k for k, _ in lenses_for(4)], ["水", "食", "住", "危険"])
+
+    def test_lms_cassettes_declare_parallel_four(self) -> None:
+        from spl.agent.llm_client import find_cassette
+        from spl.core.sim import PROJECT_ROOT
+
+        path = PROJECT_ROOT / "config" / "models.toml"
+        for name in ("ちび仙人", "Qwen仙人", "Step仙人"):
+            self.assertEqual(find_cassette(path, name).parallel, 4, name)
+        # vLLM stays at 8.
+        self.assertEqual(find_cassette(path, "Qwen仙人vLLM").parallel, 8)
+        self.assertEqual(find_cassette(path, "Gemma仙人MTP").parallel, 8)
 
 
 if __name__ == "__main__":

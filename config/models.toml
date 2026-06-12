@@ -37,6 +37,7 @@ api_key = "lm-studio"
 temperature = 0.7
 max_tokens = 384
 json_mode = true
+parallel = 4   # LM Studio既定の並列4スロット
 persona = "あなたは方丈記を記した鴨長明のごとき隠者仙人。計画的で慎重、冬に備えて保存食と井戸を重んじる。sayと日記は必ず日本語、簡潔で純文学的な無常観のある文体で。"
 
 [[cassette]]
@@ -47,6 +48,7 @@ api_key = "lm-studio"
 temperature = 0.8
 max_tokens = 384
 json_mode = true
+parallel = 4   # LM Studio既定の並列4スロット
 persona = "あなたは庵を結んだばかりの見習い仙人。短く素直に判断する。sayと日記は必ず日本語で、漢文調を気取るがたまに地が出る。"
 
 [[cassette]]
@@ -142,6 +144,7 @@ max_tokens = 1792   # 長考型(隠れ推論〜1000tok)の呼吸空間。代償�
 reasoning = true    # 推論ノーカウント: 思考部は予算外(天井4096)、時間で払う
 json_mode = true
 tps = 0.0
+parallel = 4   # LM Studio既定の並列4スロット
 persona = "あなたは方丈記を記した鴨長明のごとき隠者仙人。200Bの深い思索を持つが、行動は簡潔に。sayと日記は必ず日本語、純文学調で。"
 
 [[cassette]]

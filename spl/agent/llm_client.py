@@ -430,21 +430,49 @@ class OpenAICompatibleBrain:
         if extra:
             messages.extend(extra)
 
-        # 1) Generate `candidates` action proposals (sequential calls).
+        # 1) Generate `candidates` action proposals. When the budget wants more
+        #    than one AND the cassette declares parallel slots (LM Studio serves 4
+        #    by default; vLLM 8), issue them CONCURRENTLY so the second thought
+        #    costs ~no extra wall-clock under continuous batching. Otherwise the
+        #    original sequential path. Failures skip; the first-index successful
+        #    proposal stays the deterministic preference (order-stable).
+        n = max(1, budget.candidates)
         proposals: list[GameAction] = []
-        for _ in range(max(1, budget.candidates)):
-            try:
-                proposals.append(self._propose(messages, budget))
-            except ActionParseError as exc:
-                # A proposal that will not parse becomes Confusion if we cannot
-                # repair (雲水) — but only if NO valid proposal exists at all.
-                if not proposals:
-                    return GameAction(
-                        action="invalid_llm_output",
-                        args={},
-                        think=f"Could not parse LLM JSON: {exc}",
-                        say="The words came apart in my hands.",
-                    )
+        last_exc: ActionParseError | None = None
+        if n > 1 and self.parallel > 1:
+            # One thread per candidate (bounded by the parallel slot count). The
+            # results are reassembled IN INDEX ORDER so the first valid proposal
+            # is preferred deterministically, exactly like the sequential path.
+            workers = min(n, self.parallel)
+            results: list[GameAction | None] = [None] * n
+            with ThreadPoolExecutor(max_workers=workers) as pool:
+                futures = {
+                    pool.submit(self._propose, messages, budget): i for i in range(n)
+                }
+                for fut in futures:
+                    i = futures[fut]
+                    try:
+                        results[i] = fut.result()
+                    except ActionParseError as exc:
+                        last_exc = exc  # this candidate did not parse — skip it
+            proposals = [r for r in results if r is not None]
+        else:
+            for _ in range(n):
+                try:
+                    proposals.append(self._propose(messages, budget))
+                except ActionParseError as exc:
+                    last_exc = exc
+                    # A proposal that will not parse becomes Confusion if we
+                    # cannot repair (雲水) — but only if NO valid proposal exists.
+                    if not proposals:
+                        break
+        if not proposals:
+            return GameAction(
+                action="invalid_llm_output",
+                args={},
+                think=f"Could not parse LLM JSON: {last_exc}",
+                say="The words came apart in my hands.",
+            )
 
         # 2) Optional VERIFY pass: a second thought that catches would-be
         #    world-rejects and returns a corrected (or best-of) action.
