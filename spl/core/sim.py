@@ -6,7 +6,12 @@ from pathlib import Path
 from spl.agent.memory import Memory
 
 from .actions import ACTION_WORDS, ActionEngine, ActionResult, GameAction
-from .crops import FOOD_VALUES, CropBook
+from .crops import (
+    FOOD_VALUES,
+    CropBook,
+    merchant_planting_hint,
+    monument_inscription,
+)
 from .crafting import RecipeBook
 from .events import EventBook, MerchantOffer
 from .hero import Hero
@@ -84,7 +89,13 @@ class Simulation:
         # -> str | None. When present, the hero's nightly diary is authored by the
         # model (spec §5); otherwise the deterministic template in Memory is used.
         self.diarist: object | None = None
+        # 古い石碑: epitaphs carved on the BACK of the settlers' stone — the
+        # mottos of the last 1-2 past lives. The UIs that load the 冒険の書 set
+        # this BEFORE play starts (see cli.py / pixel app); empty means the stone
+        # has only its agronomy face. The graves teach when the book is on.
+        self.monument_epitaphs: list[str] = []
         self.log(f"Day {self.world.day} begins: {SEASON_NAMES[self.world.season]}, {WEATHER_NAMES[self.world.weather]}.")
+        self._log_monument()
         self._start_day_events()
 
     @property
@@ -229,10 +240,31 @@ class Simulation:
     def set_diarist(self, diarist: object | None) -> None:
         self.diarist = diarist
 
+    def _log_monument(self) -> None:
+        """Carve the settlers' agronomy onto the day-1 log (古い石碑). One line,
+        built from REAL crop data so it can never drift from the world's rules.
+        Lands in full_log; the day-1 recent window shows it to the brain."""
+        self.log(monument_inscription(self.crop_book))
+
+    def set_monument_epitaphs(self, epitaphs: list[str]) -> None:
+        """Carve up to 2 past-life mottos onto the BACK of the stone and ring
+        them once in the log (古い石碑の裏). Called by the --book wiring BEFORE
+        play, so on day 1 the graves teach. Empty/blank entries are dropped;
+        a no-op when nothing is set (the stone keeps only its agronomy face)."""
+        cleaned = [str(e).strip() for e in (epitaphs or []) if str(e).strip()][:2]
+        self.monument_epitaphs = cleaned
+        for motto in cleaned:
+            self.log(f"石碑の裏に、後から刻まれた言葉がある: 『{motto}』")
+
     def _start_day_events(self) -> None:
         if self.world.day > 1 and self.world.day % self.event_book.merchant_interval == 0:
             self.current_offer = self.rng.choice(self.event_book.offers)
             self.log("Merchant arrives: " + self.current_offer.describe())
+            # 行商人の世間話: one extra line of deterministic planting small-talk,
+            # reckoned from the current day + crop data (no RNG). Lands in the
+            # day_log -> recent window, so the brain reads the lead-time hint.
+            hint = merchant_planting_hint(self.crop_book, self.world.day, self.world.season)
+            self.log(f"行商人は世間話に言う: 『{hint}』")
         if self.world.day > 4 and not self.hero.has("fence") and self.rng.chance(self.event_book.dog_chance):
             stolen = self._steal_food()
             if stolen:

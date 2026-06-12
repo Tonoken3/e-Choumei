@@ -43,17 +43,31 @@ def _book_cassette_name(args: object, brain: object | None) -> str:
     return name or "Local仙人"
 
 
-def _load_book(args: object, brain: object | None) -> "BoukenNoSho | None":
+def _load_book(args: object, brain: object | None,
+               sim: object | None = None) -> "BoukenNoSho | None":
     """When --book is on, load this cassette's adventure book and inject the
     past-life lessons into the (LLM) brain's observer. Returns the book so the
     caller can append the new life at the end. Local brains ignore the lessons
-    but the book still records their runs via the fallback lessons."""
+    but the book still records their runs via the fallback lessons.
+
+    古い石碑: when a ``sim`` is given, carve the last 1-2 past lives' mottos onto
+    the back of the stone BEFORE play, so the graves teach on day 1."""
     if not getattr(args, "book", False):
         return None
     book = BoukenNoSho.for_cassette(_book_cassette_name(args, brain))
     if brain is not None and getattr(brain, "observer", None) is not None:
         inject_into_observer(brain.observer, book, getattr(args, "seed", 0))
+    if sim is not None:
+        sim.set_monument_epitaphs(_book_epitaphs(book))
     return book
+
+
+def _book_epitaphs(book: "BoukenNoSho") -> list[str]:
+    """The last 1-2 past lives' mottos for the 石碑 back-face (most recent
+    last). Skips blank mottos so an early life with no parting words leaves no
+    empty carving."""
+    mottos = [str(e.get("motto", "")).strip() for e in book.entries]
+    return [m for m in mottos if m][-2:]
 
 
 def _record_life(book: "BoukenNoSho | None", sim: object, seed: int,
@@ -90,7 +104,7 @@ def run_play(args: object) -> int:
     local_agent = LocalPolicyAgent()
     brain = _make_brain(args)
     observer = ObservationBuilder()
-    book = _load_book(args, brain if args.llm else None)
+    book = _load_book(args, brain if args.llm else None, sim)
     last_day = sim.world.day
     if args.llm and brain is not None:
         sim.set_diarist(brain)
@@ -178,7 +192,7 @@ def run_simulate(args: object) -> int:
         sim.set_strategy(args.strategy)
     local_agent = LocalPolicyAgent()
     brain = _make_brain(args)
-    book = _load_book(args, brain if args.llm else None)
+    book = _load_book(args, brain if args.llm else None, sim)
     if args.llm and brain is not None:
         sim.set_diarist(brain)
     max_turns = args.days * 50

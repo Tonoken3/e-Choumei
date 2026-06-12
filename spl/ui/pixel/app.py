@@ -529,8 +529,15 @@ class PixelApp:
         return BoukenNoSho.for_cassette(self._book_cassette_name())
 
     def _inject_book(self) -> None:
-        """Hand the past-life lessons to the brain's observer for THIS run."""
-        if self.book is None or self.brain is None:
+        """Hand the past-life lessons to the brain's observer for THIS run, and
+        carve the last 1-2 mottos onto the 石碑's back (古い石碑) before play."""
+        if self.book is None:
+            return
+        # 古い石碑: the graves teach even for a local (non-LLM) run — set the
+        # epitaphs on the sim regardless of whether a brain reads the lessons.
+        mottos = [str(e.get("motto", "")).strip() for e in self.book.entries]
+        self.sim.set_monument_epitaphs([m for m in mottos if m][-2:])
+        if self.brain is None:
             return
         from spl.agent.bouken import inject_into_observer
 
@@ -824,6 +831,10 @@ class PixelApp:
         crop = uh.crop_tooltip(f, self.sim, tile)
         if crop:
             return f"{name} — {crop}"
+        # 古い石碑: the stone's tile names the monument over the bare ground.
+        if tile == self._monument_pos():
+            stele = f.jp("古い石碑", "Old Stone Monument")
+            return f"{name} — {stele}" if tile != self.sim.hero.pos else stele
         if tile == self.sim.hero.pos:
             return f"{name}（" + f.jp("現在地", "you") + "）"
         return name
@@ -1408,6 +1419,11 @@ class PixelApp:
             spr = self.factory.workshop()
             surf.blit(spr, (cx - spr.get_width() // 2, cy - spr.get_height() + s2))
 
+        # 古い石碑: the settlers' stone, on its fixed tile near home.
+        if pos == self._monument_pos():
+            spr = self.factory.stele()
+            surf.blit(spr, (cx - spr.get_width() // 2, cy - spr.get_height() + s2))
+
         plot = world.plots.get(pos)
         if plot is not None:
             stage = self._crop_stage(plot)
@@ -1422,6 +1438,24 @@ class PixelApp:
         if self.sim.hero.pos == pos:
             spr = self.factory.hero(frame)
             surf.blit(spr, (cx - spr.get_width() // 2, cy - spr.get_height() + s2))
+
+    def _monument_pos(self) -> Position:
+        """A deterministic walkable tile near home for the 古い石碑 (the stone
+        stands forever in one place). Scans a fixed ring of offsets around the
+        home tile and takes the first in-bounds tile that is not water, home or
+        workshop — so the stele never lands on the sea or on a building."""
+        world = self.sim.world
+        home = world.start_pos
+        # fixed offset ring, preference order (NW corner first); deterministic.
+        for dx, dy in ((-1, -1), (-1, 0), (0, -1), (-1, 1), (1, -1),
+                       (-2, 0), (0, -2), (-2, -1), (-1, -2), (1, 1)):
+            pos = Position(home.x + dx, home.y + dy)
+            if not world.in_bounds(pos):
+                continue
+            if world.tile_at(pos) in {"water", "home", "workshop"}:
+                continue
+            return pos
+        return Position(home.x - 1, home.y)
 
     def _merchant_pos(self) -> Position:
         """A deterministic tile next to the hero to stand the merchant on."""

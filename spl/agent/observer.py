@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from spl.core.crops import FOOD_VALUES
+from spl.core.crops import FOOD_VALUES, monument_agronomy_line
 from spl.core.world import SEASON_NAMES, TILE_NAMES, WEATHER_NAMES
 
 
@@ -78,6 +78,11 @@ class ObservationBuilder:
             "alerts": alerts,
             "trade_offer": sim.current_offer.describe() if sim.current_offer else None,
             "memory": sim.memory.recent_context(days=4),
+            # 古い石碑: the settlers' agronomy as permanent background knowledge —
+            # always present (the stone stands forever), placed AFTER inventory
+            # and alerts so it reads as lore, not an alarm. ~120 chars, built
+            # from the real crop data via the sim's loaded crop_book.
+            "monument": monument_agronomy_line(sim.crop_book),
         })
         return obs
 

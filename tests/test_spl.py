@@ -1732,6 +1732,184 @@ class SettlerBriefingTests(unittest.TestCase):
             self.assertIn(law, SYSTEM_PROMPT)
 
 
+class MonumentTests(unittest.TestCase):
+    """古い石碑 — the settlers' stone teaches REAL agronomy + past lives' mottos."""
+
+    def test_inscription_logged_day_one_with_true_growth_days(self) -> None:
+        # The stone's number for a crop must be exactly what the data says, read
+        # from the SAME crop_book the sim loaded (no hard-coded magic number).
+        sim = Simulation(seed=42, max_days=112)
+        line = next((l for l in sim.full_log if "古い石碑が立つ" in l), None)
+        self.assertIsNotNone(line, "monument inscription missing from day-1 log")
+        turnip = sim.crop_book.get("turnip")
+        wheat = sim.crop_book.get("wheat")
+        self.assertIn(f"カブは{turnip.grow_days}日", line)
+        self.assertIn(f"小麦は{wheat.grow_days}日", line)
+        # the winter date and the settlers' warning are carved too
+        self.assertIn("冬は85日目に来る", line)
+        self.assertIn("実りより先に、種を数えよ", line)
+
+    def test_obs_always_carries_monument_key(self) -> None:
+        from spl.agent.observer import ObservationBuilder
+
+        sim = Simulation(seed=42, max_days=112)
+        obs = ObservationBuilder().build(sim)
+        self.assertIn("monument", obs)
+        mon = obs["monument"]
+        self.assertIsInstance(mon, str)
+        # a real crop's true growth days appears in the compact line
+        self.assertIn(f"カブ{sim.crop_book.get('turnip').grow_days}日", mon)
+        # background knowledge, not an alarm: it sits AFTER inventory/alerts
+        keys = list(obs.keys())
+        self.assertGreater(keys.index("monument"), keys.index("alerts"))
+        self.assertGreater(keys.index("monument"), keys.index("inventory"))
+
+    def test_epitaphs_logged_when_set_absent_otherwise(self) -> None:
+        # No epitaphs by default -> no back-carving line on the stone.
+        bare = Simulation(seed=42, max_days=20)
+        self.assertEqual(bare.monument_epitaphs, [])
+        self.assertFalse(any("石碑の裏" in l for l in bare.full_log))
+
+        # Setting mottos carves them on the back: blanks dropped, capped at 2
+        # (callers pass the last 1-2 entries; the sim just keeps the first two).
+        sim = Simulation(seed=42, max_days=20)
+        sim.set_monument_epitaphs(["ゆく河の流れは絶えずして", "", "水を絶やすな"])
+        self.assertEqual(sim.monument_epitaphs, ["ゆく河の流れは絶えずして", "水を絶やすな"])
+        carved = [l for l in sim.full_log if "石碑の裏" in l]
+        self.assertEqual(len(carved), 2)
+        self.assertIn("ゆく河の流れは絶えずして", carved[0])
+        self.assertIn("水を絶やすな", carved[1])
+
+    def test_merchant_arrival_appends_planting_hint(self) -> None:
+        from spl.agent.policy import LocalPolicyAgent
+
+        sim = Simulation(seed=42, max_days=20)
+        agent = LocalPolicyAgent()
+        for _ in range(20 * 60):
+            if sim.done or sim.world.day > 7:
+                break
+            sim.step(agent.choose(sim))
+        # the merchant arrives on day 7 (interval 7); the small-talk line follows.
+        arrivals = [i for i, l in enumerate(sim.full_log) if "Merchant arrives" in l]
+        self.assertTrue(arrivals, "no merchant arrival logged by day 7")
+        hints = [l for l in sim.full_log if "行商人は世間話に言う" in l]
+        self.assertTrue(hints, "merchant arrival did not append a planting hint")
+
+    def test_merchant_hint_follows_the_deterministic_rule(self) -> None:
+        from spl.core.crops import merchant_planting_hint
+
+        book = Simulation(seed=42, max_days=112).crop_book
+        # (a) a crop still fits -> recommend the most-nourishing such crop. On
+        # day 70 pumpkin (12d, food 35) finishes by day 82 <= 84 -> pumpkin wins.
+        self.assertEqual(
+            merchant_planting_hint(book, 70, "autumn"),
+            "今からカボチャを植えれば、冬の前に実りますよ",
+        )
+        # narrower window day 77: pumpkin no longer fits (77+12=89>84); the
+        # best of what's left (tomato 7d food 20 vs turnip 4d food 18) is tomato.
+        self.assertEqual(
+            merchant_planting_hint(book, 77, "autumn"),
+            "今からトマトを植えれば、冬の前に実りますよ",
+        )
+        # (b) the window has closed (nothing matures by winter) -> stores & walls.
+        self.assertEqual(
+            merchant_planting_hint(book, 84, "autumn"),
+            "もう種時は過ぎましたなぁ。蓄えと壁の支度をなさい",
+        )
+        # (c) winter: nothing to plant -> keep seed for the 28-day spring.
+        self.assertEqual(
+            merchant_planting_hint(book, 90, "winter"),
+            "春は二十八日続きます。種を残しておきなさい",
+        )
+
+    def test_cli_book_carves_last_mottos_as_epitaphs(self) -> None:
+        # --book on: the last 1-2 past lives' mottos are carved on the stone's
+        # back before play, so the graves teach on day 1.
+        import os
+        import tempfile
+        from types import SimpleNamespace
+
+        from spl.agent.bouken import BoukenNoSho, book_path_for
+        from spl.ui import cli
+
+        with tempfile.TemporaryDirectory() as tmp:
+            old = os.environ.get("SPL_BOOK_DIR")
+            os.environ["SPL_BOOK_DIR"] = tmp
+            captured: dict = {}
+            orig = cli.print_result
+
+            def _spy(sim, motto=None, **kw):  # noqa: ANN001
+                captured["epi"] = list(sim.monument_epitaphs)
+
+            cli.print_result = _spy
+            try:
+                book = BoukenNoSho.load(book_path_for("EpiCass"))
+                book.append({"seed": 0, "days": 5, "lessons": ["x"], "motto": "一生目の銘"})
+                book.append({"seed": 0, "days": 9, "lessons": ["y"], "motto": "二生目の銘"})
+                args = SimpleNamespace(seed=0, days=5, llm=False, cassette="EpiCass",
+                                       strategy=None, tps=0, book=True)
+                cli.run_simulate(args)
+            finally:
+                cli.print_result = orig
+                if old is None:
+                    os.environ.pop("SPL_BOOK_DIR", None)
+                else:
+                    os.environ["SPL_BOOK_DIR"] = old
+            self.assertEqual(captured["epi"], ["一生目の銘", "二生目の銘"])
+
+    def test_monument_draws_no_rng_so_runs_stay_deterministic(self) -> None:
+        # Two same-seed local runs must still produce byte-identical full_log,
+        # proving the stone + the merchant small-talk never touch sim.rng.
+        left = run_local(seed=45, days=30)
+        right = run_local(seed=45, days=30)
+        self.assertEqual(left.full_log, right.full_log)
+        # the new diegetic lines are actually present in that log
+        self.assertTrue(any("古い石碑が立つ" in l for l in left.full_log))
+
+
+@unittest.skipUnless(_HAS_PYGAME, "pygame not installed")
+class MonumentPixelTests(unittest.TestCase):
+    """古い石碑 in the voxel diorama: a stable, walkable tile + a rendered stele."""
+
+    def _app(self):
+        from types import SimpleNamespace
+
+        from spl.ui.pixel.app import PixelApp
+
+        args = SimpleNamespace(
+            seed=42, days=112, llm=False, cassette="x", manual=True, speed=2,
+            scale=2, start_day=0, shots=0, shots_ui=False, shot_dir="/tmp/spl_test",
+            strategy=None, tps=0.0,
+        )
+        return PixelApp(args, headless=True)
+
+    def test_monument_tile_is_deterministic_near_home_and_walkable(self) -> None:
+        app = self._app()
+        pos = app._monument_pos()
+        # deterministic: the same app yields the same tile every call
+        self.assertEqual((pos.x, pos.y), (app._monument_pos().x, app._monument_pos().y))
+        # near home, never on water / home / workshop
+        home = app.sim.world.start_pos
+        self.assertLessEqual(abs(pos.x - home.x) + abs(pos.y - home.y), 4)
+        self.assertNotIn(app.sim.world.tile_at(pos), {"water", "home", "workshop"})
+        self.assertTrue(app.sim.world.in_bounds(pos))
+
+    def test_tile_header_names_the_monument(self) -> None:
+        app = self._app()
+        header = app._tile_header(app._monument_pos())
+        self.assertIn("古い石碑", app.fonts.jp("古い石碑", "Old Stone Monument"))
+        self.assertIn(app.fonts.jp("古い石碑", "Old Stone Monument"), header)
+
+    def test_stele_sprite_builds_and_world_renders(self) -> None:
+        app = self._app()
+        spr = app.factory.stele()
+        self.assertGreater(spr.get_width(), 0)
+        self.assertGreater(spr.get_height(), 0)
+        # the full voxel pipeline (which blits the stele on its tile) renders
+        win = app.pg.Surface((app.lay.win_w, app.lay.win_h))
+        app.render(win)  # must not raise
+
+
 if __name__ == "__main__":
     unittest.main()
 

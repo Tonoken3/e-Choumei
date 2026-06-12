@@ -377,6 +377,68 @@ class SpriteFactory:
         self._misc["workshop"] = surf
         return surf
 
+    # -- 古い石碑 (the settlers' stone) --------------------------------------
+    def stele(self) -> "pygame.Surface":
+        """A small weathered stone stele: two stacked grey cuboids (a squat base
+        and a taller upright slab) with a lighter inscribed front face and a
+        moss dab on top. Built from the same flat-shaded cuboid helpers as the
+        rocks/buildings so it sits in the diorama under the one sun."""
+        cached = self._misc.get("stele")
+        if cached is not None:
+            return cached
+        pg = self.pg
+        sc = self.scale
+        grey = pal.ROCK_TOP
+        # squat base block
+        base_hw = max(5, int(round(13 * sc)))
+        base_hh = max(2, base_hw // 2)
+        base_h = int(round(6 * sc))
+        # upright slab (narrower, tall) — the inscribed stone itself
+        slab_hw = max(4, int(round(9 * sc)))
+        slab_hh = max(2, slab_hw // 2)
+        slab_h = int(round(26 * sc))
+        w = base_hw * 2 + self._s(4)
+        h = base_hh * 2 + base_h + slab_hh * 2 + slab_h + self._s(4)
+        surf = pg.Surface((w, h), pg.SRCALPHA)
+        cx = w // 2
+        base_top_y = h - (base_hh * 2 + base_h) - self._s(1)
+        self._draw_cuboid(surf, cx - base_hw, base_top_y, base_hw, base_hh, base_h, grey)
+        slab_top_y = base_top_y - (slab_hh * 2 + slab_h) + self._s(2)
+        self._draw_cuboid(surf, cx - slab_hw, slab_top_y, slab_hw, slab_hh, slab_h, grey)
+        # lighter inscribed front (right) face: a panel of carved text-lines so
+        # the stone reads as a written monument, not just a rock.
+        face = pal.lighten(grey, 26)
+        skew = max(1, slab_hh - self._s(2))
+        rx0 = cx + self._s(2)
+        ry0 = slab_top_y + slab_hh + self._s(3)
+        panel_w = max(self._s(3), slab_hw - self._s(3))
+        panel_h = max(self._s(6), slab_h - self._s(6))
+        pg.draw.polygon(surf, face, [
+            (rx0, ry0),
+            (rx0 + panel_w, ry0 + skew),
+            (rx0 + panel_w, ry0 + skew + panel_h),
+            (rx0, ry0 + panel_h),
+        ])
+        carve = pal.shade(grey, 0.5)
+        line_w = max(1, self._s(1))
+        rows = max(3, int(5 * sc))
+        for i in range(rows):
+            ly = ry0 + self._s(2) + i * max(2, self._s(3))
+            if ly > ry0 + panel_h - self._s(1):
+                break
+            pg.draw.line(surf, carve, (rx0 + self._s(1), ly),
+                         (rx0 + panel_w - self._s(1), ly + skew - self._s(1)), line_w)
+        # moss dab on the slab top (deterministic, like the rocks)
+        mr = random.Random(0x57E1E)
+        top_cx, top_cy = cx, slab_top_y + slab_hh
+        for _ in range(int(5 * sc) + 1):
+            mx = top_cx + mr.randint(-slab_hw + 2, slab_hw - 2)
+            my = top_cy + mr.randint(-slab_hh + 1, slab_hh - 1)
+            if 0 <= mx < w and 0 <= my < h:
+                surf.set_at((mx, my), pal.ROCK_MOSS)
+        self._misc["stele"] = surf
+        return surf
+
     # -- crops ---------------------------------------------------------------
     def crop(self, crop_key: str, stage: int, frame: int = 0) -> "pygame.Surface":
         f = frame if stage >= 3 else 0
