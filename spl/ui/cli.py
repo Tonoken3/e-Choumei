@@ -134,7 +134,7 @@ def compile_canon(book: "BoukenNoSho", brain: object | None) -> list[str]:
 
 def run_play(args: object) -> int:
     sim = Simulation(seed=args.seed, max_days=args.days,
-                     difficulty=getattr(args, "difficulty", "ふつう"))
+                     difficulty=getattr(args, "difficulty", "修羅"))
     if getattr(args, "strategy", None):
         sim.set_strategy(args.strategy)
     local_agent = LocalPolicyAgent()
@@ -226,7 +226,7 @@ def _final_motto(sim: Simulation, brain: object | None) -> dict[str, object]:
 
 def run_simulate(args: object) -> int:
     sim = Simulation(seed=args.seed, max_days=args.days,
-                     difficulty=getattr(args, "difficulty", "ふつう"))
+                     difficulty=getattr(args, "difficulty", "修羅"))
     if getattr(args, "strategy", None):
         sim.set_strategy(args.strategy)
     local_agent = LocalPolicyAgent()
@@ -461,10 +461,11 @@ def print_result(sim: Simulation, motto: dict[str, object] | None = None,
         shown = shown if len(shown) <= 40 else shown[:40] + "…"
         print(f"来歴: {shown}")
     print("-" * 72)
-    # きびしさ: name the island only when it is NOT the canonical ふつう benchmark,
-    # so a record run reads clean and a やさしい/修羅 run is honestly flagged.
-    difficulty = getattr(sim, "difficulty", "ふつう")
-    if difficulty != "ふつう":
+    # きびしさ: name the island only when it is 楽園 — 修羅 is the canonical
+    # benchmark (records' home), so a record run reads clean and a 楽園 run is
+    # honestly flagged.
+    difficulty = getattr(sim, "difficulty", "修羅")
+    if difficulty != "修羅":
         print(f"きびしさ: {difficulty}")
     print(sim.result_reason or ("Still alive." if sim.hero.alive else "The hero fell."))
     print(sim.status_line())

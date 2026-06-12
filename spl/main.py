@@ -109,18 +109,18 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
-DIFFICULTY_CHOICES = ("やさしい", "ふつう", "修羅")
+DIFFICULTY_CHOICES = ("楽園", "修羅")
 
 
 def _add_difficulty(parser: argparse.ArgumentParser) -> None:
-    """きびしさ: pick the island's nightly-tax tier. ふつう is the canonical
-    benchmark (record runs use it); やさしい softens the bleed + hands a small
-    starting cache for first-timers; 修羅 sharpens it."""
+    """きびしさ: pick the island's nightly-tax tier. Two islands. 修羅 is the
+    canonical benchmark (record runs use it; the island was already 修羅); 楽園
+    softens the bleed + hands a small starting cache for first-timers."""
     parser.add_argument(
         "--difficulty",
-        default="ふつう",
+        default="修羅",
         choices=DIFFICULTY_CHOICES,
-        help="きびしさ: やさしい / ふつう(正典) / 修羅 (default: ふつう)",
+        help="きびしさ: 楽園(はじめての方へ) / 修羅(正典・記録はこちら) (default: 修羅)",
     )
 
 
@@ -231,7 +231,7 @@ def run_evolve(args: object) -> int:
         book_dir_cassette=getattr(args, "cassette", None),
         player_persona=player_persona,
         persona_mode=persona_mode,
-        difficulty=getattr(args, "difficulty", "ふつう"),
+        difficulty=getattr(args, "difficulty", "修羅"),
     )
 
 

@@ -138,7 +138,7 @@ class PixelApp:
         self.sim = Simulation(
             seed=getattr(args, "seed", 42),
             max_days=getattr(args, "days", 112),
-            difficulty=getattr(args, "difficulty", "ふつう"),
+            difficulty=getattr(args, "difficulty", "修羅"),
         )
         # --strategy seeds the initial standing 作戦 before the run begins.
         strategy = getattr(args, "strategy", None)
@@ -722,7 +722,7 @@ class PixelApp:
         self.sim = Simulation(
             seed=getattr(self.args, "seed", 42),
             max_days=getattr(self.args, "days", 112),
-            difficulty=getattr(self.args, "difficulty", "ふつう"),
+            difficulty=getattr(self.args, "difficulty", "修羅"),
         )
         strategy = getattr(self.args, "strategy", None)
         if strategy:

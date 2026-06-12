@@ -2716,15 +2716,19 @@ class PersonaPresetTests(unittest.TestCase):
 
 
 class DifficultyTests(unittest.TestCase):
-    """きびしさ (difficulty): softer/harsher nightly tax, ふつう = canonical."""
+    """きびしさ (difficulty): two islands only — 楽園 (paradise) softens the
+    nightly tax, 修羅 (carnage) is the canonical benchmark + every record's home
+    ("the island was already 修羅")."""
 
-    def test_futsuu_table_byte_matches_previous_constants(self) -> None:
-        # Guard: the ふつう tier must reproduce the exact pre-difficulty numbers,
-        # so the canonical benchmark island (and the 18-day record) never drifts.
+    def test_shura_table_byte_matches_previous_constants(self) -> None:
+        # Guard: 修羅 (the canonical benchmark, default) reproduces the exact
+        # pre-difficulty numbers, so the record island never drifts. These are
+        # byte-identical to the original constants.
         from spl.core.sim import DEFAULT_DIFFICULTY, DIFFICULTY
 
-        self.assertEqual(DEFAULT_DIFFICULTY, "ふつう")
-        f = DIFFICULTY["ふつう"]
+        self.assertEqual(DEFAULT_DIFFICULTY, "修羅")
+        self.assertEqual(set(DIFFICULTY), {"楽園", "修羅"})  # exactly two islands
+        f = DIFFICULTY["修羅"]
         self.assertEqual(f["hunger"], -15)
         self.assertEqual(f["water"], -20)
         self.assertEqual(f["sanity"], -2)
@@ -2735,33 +2739,33 @@ class DifficultyTests(unittest.TestCase):
         self.assertEqual(f["winter_sanity"], -2)
         self.assertEqual(f["inventory_bonus"], {})
 
-    def test_easy_difficulty_softens_one_end_day(self) -> None:
-        # やさしい: a single nightly decay applies the gentler hunger/water deltas.
-        sim = Simulation(seed=42, max_days=10, difficulty="やさしい")
-        self.assertEqual(sim.difficulty, "やさしい")
+    def test_paradise_difficulty_softens_one_end_day(self) -> None:
+        # 楽園: a single nightly decay applies the gentler hunger/water deltas.
+        sim = Simulation(seed=42, max_days=10, difficulty="楽園")
+        self.assertEqual(sim.difficulty, "楽園")
         h0, w0 = sim.hero.hunger, sim.hero.water
         sim._daily_decay()
         self.assertEqual(sim.hero.hunger - h0, -10)
         self.assertEqual(sim.hero.water - w0, -14)
 
-    def test_shura_difficulty_hardens_one_end_day(self) -> None:
-        # 修羅: a single nightly decay applies the harsher hunger/water deltas.
+    def test_shura_difficulty_is_the_canonical_one_end_day(self) -> None:
+        # 修羅: a single nightly decay applies the canonical hunger/water deltas.
         sim = Simulation(seed=42, max_days=10, difficulty="修羅")
         self.assertEqual(sim.difficulty, "修羅")
         h0, w0 = sim.hero.hunger, sim.hero.water
         sim._daily_decay()
-        self.assertEqual(sim.hero.hunger - h0, -18)
-        self.assertEqual(sim.hero.water - w0, -24)
+        self.assertEqual(sim.hero.hunger - h0, -15)
+        self.assertEqual(sim.hero.water - w0, -20)
 
-    def test_easy_difficulty_grants_start_inventory_bonus(self) -> None:
-        easy = Simulation(seed=42, difficulty="やさしい")
-        norm = Simulation(seed=42, difficulty="ふつう")
+    def test_paradise_difficulty_grants_start_inventory_bonus(self) -> None:
+        easy = Simulation(seed=42, difficulty="楽園")
+        norm = Simulation(seed=42, difficulty="修羅")
         self.assertEqual(easy.hero.inventory["berries"], norm.hero.inventory["berries"] + 3)
         self.assertEqual(easy.hero.inventory["wood"], norm.hero.inventory["wood"] + 2)
 
     def test_starvation_dehydration_bleed_scales_with_difficulty(self) -> None:
         # The HP bleed at hunger/water 0 follows the table (and logs the magnitude).
-        for diff, starve, dehydrate in (("やさしい", -7, -10), ("ふつう", -10, -15), ("修羅", -12, -18)):
+        for diff, starve, dehydrate in (("楽園", -7, -10), ("修羅", -10, -15)):
             sim = Simulation(seed=3, max_days=10, difficulty=diff)
             sim.hero.hunger = 0
             sim.hero.water = 0
@@ -2772,28 +2776,34 @@ class DifficultyTests(unittest.TestCase):
             self.assertTrue(any(f"HP {starve}." in ln for ln in sim.full_log), diff)
             self.assertTrue(any(f"HP {dehydrate}." in ln for ln in sim.full_log), diff)
 
-    def test_unknown_and_default_difficulty_fall_back_to_futsuu(self) -> None:
-        self.assertEqual(Simulation(seed=1).difficulty, "ふつう")
-        self.assertEqual(Simulation(seed=1, difficulty="激辛").difficulty, "ふつう")
+    def test_legacy_aliases_and_unknown_and_default_map_to_two_modes(self) -> None:
+        # Default and any unknown value → 修羅 (canonical). Legacy three-mode names
+        # still resolve: ふつう→修羅, やさしい→楽園. 楽園/修羅 pass through verbatim.
+        self.assertEqual(Simulation(seed=1).difficulty, "修羅")
+        self.assertEqual(Simulation(seed=1, difficulty="激辛").difficulty, "修羅")
+        self.assertEqual(Simulation(seed=1, difficulty="ふつう").difficulty, "修羅")
+        self.assertEqual(Simulation(seed=1, difficulty="やさしい").difficulty, "楽園")
+        self.assertEqual(Simulation(seed=1, difficulty="楽園").difficulty, "楽園")
+        self.assertEqual(Simulation(seed=1, difficulty="修羅").difficulty, "修羅")
 
-    def test_default_run_matches_pre_change_behaviour_and_defaults_futsuu(self) -> None:
+    def test_default_run_matches_pre_change_behaviour_and_defaults_shura(self) -> None:
         # The existing determinism test proves same-seed reproduction; here we
-        # assert explicitly that the DEFAULT difficulty is ふつう and that an
-        # explicit ふつう reproduces the bare-default run byte-for-byte.
+        # assert explicitly that the DEFAULT difficulty is 修羅 and that an
+        # explicit 修羅 reproduces the bare-default run byte-for-byte.
         bare = run_local(seed=45, days=30)
-        explicit = Simulation(seed=45, max_days=30, difficulty="ふつう")
+        explicit = Simulation(seed=45, max_days=30, difficulty="修羅")
         agent = LocalPolicyAgent()
         for _ in range(30 * 60):
             if explicit.done:
                 break
             explicit.step(agent.choose(explicit))
-        self.assertEqual(bare.difficulty, "ふつう")
+        self.assertEqual(bare.difficulty, "修羅")
         self.assertEqual(bare.full_log, explicit.full_log)
         self.assertEqual(bare.score(), explicit.score())
 
     def test_difficulty_does_not_consume_rng(self) -> None:
         # きびしさ must scale fixed deltas only — never DRAW from the RNG. Drive two
-        # sims (やさしい vs 修羅) with the SAME fixed action each turn so the hero
+        # sims (楽園 vs 修羅) with the SAME fixed action each turn so the hero
         # behaves identically; the RNG-driven world stream (weather transitions,
         # merchant arrivals, dog raids, storm damage) must then be byte-identical.
         # RNG-driven world events only: day/weather rolls, merchants, dog raids,
@@ -2813,9 +2823,9 @@ class DifficultyTests(unittest.TestCase):
                       if any(m in ln for m in markers)]
             return weathers, events
 
-        w_easy, e_easy = world_stream("やさしい")
+        w_easy, e_easy = world_stream("楽園")
         w_shura, e_shura = world_stream("修羅")
-        # 修羅 dies sooner, so its streams are a PREFIX of やさしい's — the RNG draw
+        # 修羅 dies sooner, so its streams are a PREFIX of 楽園's — the RNG draw
         # order over the shared survival span must match exactly (difficulty never
         # draws; it only scales the tax that decides WHEN the prefix ends).
         n_w = min(len(w_easy), len(w_shura))
@@ -2827,27 +2837,27 @@ class DifficultyTests(unittest.TestCase):
     def test_settlers_briefing_tells_the_truth_per_difficulty(self) -> None:
         from spl.agent.prompts import settlers_briefing
 
-        easy = settlers_briefing("やさしい")
+        easy = settlers_briefing("楽園")
         self.assertIn("hunger -10, water -14", easy)
         self.assertIn("bleed 7 HP", easy)
         self.assertIn("bleed 10 HP", easy)
         self.assertIn("-2 HP and -1 sanity", easy)
 
         shura = settlers_briefing("修羅")
-        self.assertIn("hunger -18, water -24", shura)
-        self.assertIn("bleed 12 HP", shura)
-        self.assertIn("bleed 18 HP", shura)
-        self.assertIn("-6 HP and -3 sanity", shura)
+        self.assertIn("hunger -15, water -20", shura)
+        self.assertIn("bleed 10 HP", shura)
+        self.assertIn("bleed 15 HP", shura)
+        self.assertIn("-4 HP and -2 sanity", shura)
 
-    def test_system_prompt_futsuu_is_byte_identical_default(self) -> None:
-        # The module default SYSTEM_PROMPT must carry the ふつう briefing numbers
-        # (back-compat for the existing prompt tests).
+    def test_system_prompt_shura_is_byte_identical_default(self) -> None:
+        # The module default SYSTEM_PROMPT must carry the 修羅 briefing numbers
+        # (the canonical benchmark; back-compat for the existing prompt tests).
         from spl.agent.prompts import SYSTEM_PROMPT, system_prompt_for_difficulty
 
         self.assertIn("hunger -15, water -20", SYSTEM_PROMPT)
         self.assertIn("bleed 10 HP", SYSTEM_PROMPT)
         self.assertIn("bleed 15 HP", SYSTEM_PROMPT)
-        self.assertEqual(SYSTEM_PROMPT, system_prompt_for_difficulty("ふつう"))
+        self.assertEqual(SYSTEM_PROMPT, system_prompt_for_difficulty("修羅"))
 
     def test_brain_action_system_message_carries_difficulty_numbers(self) -> None:
         # The brain's action system message (built from the sim) must contain the
@@ -2856,22 +2866,22 @@ class DifficultyTests(unittest.TestCase):
         from spl.agent.llm_client import Cassette, OpenAICompatibleBrain
 
         brain = OpenAICompatibleBrain(Cassette(name="x", base_url="http://stub/v1"))
-        shura = Simulation(seed=42, max_days=10, difficulty="修羅")
-        msg = brain.system_prompt_for(shura)
-        self.assertIn("hunger -18, water -24", msg)
-        self.assertIn("bleed 12 HP", msg)
-        # a ふつう sim yields the canonical numbers from the same call
-        normal = Simulation(seed=42, max_days=10, difficulty="ふつう")
+        easy = Simulation(seed=42, max_days=10, difficulty="楽園")
+        msg = brain.system_prompt_for(easy)
+        self.assertIn("hunger -10, water -14", msg)
+        self.assertIn("bleed 7 HP", msg)
+        # a 修羅 sim yields the canonical numbers from the same call
+        normal = Simulation(seed=42, max_days=10, difficulty="修羅")
         self.assertIn("hunger -15, water -20", brain.system_prompt_for(normal))
 
     def test_build_entry_records_difficulty(self) -> None:
         from spl.agent.bouken import build_entry
 
-        sim = Simulation(seed=42, max_days=10, difficulty="修羅")
+        sim = Simulation(seed=42, max_days=10, difficulty="楽園")
         entry = build_entry(sim, 42, {"motto": "x", "lessons": ["a", "b", "c"]})
-        self.assertEqual(entry["difficulty"], "修羅")
+        self.assertEqual(entry["difficulty"], "楽園")
         norm = build_entry(Simulation(seed=42, max_days=10), 42, {})
-        self.assertEqual(norm["difficulty"], "ふつう")
+        self.assertEqual(norm["difficulty"], "修羅")
 
     def test_simulate_difficulty_flag_wires_into_the_sim(self) -> None:
         from types import SimpleNamespace
@@ -2880,7 +2890,7 @@ class DifficultyTests(unittest.TestCase):
 
         args = SimpleNamespace(
             seed=42, days=6, llm=False, cassette=None, strategy=None, tps=0,
-            difficulty="やさしい",
+            difficulty="楽園",
         )
         captured: dict[str, object] = {}
         orig = cli.print_result
@@ -2894,20 +2904,22 @@ class DifficultyTests(unittest.TestCase):
             cli.run_simulate(args)
         finally:
             cli.print_result = orig
-        self.assertEqual(captured["difficulty"], "やさしい")
+        self.assertEqual(captured["difficulty"], "楽園")
 
     def test_difficulty_parser_choices(self) -> None:
         from spl.main import build_parser
 
         parser = build_parser()
         for sub in ("play", "simulate", "pixel"):
-            ns = parser.parse_args([sub, "--difficulty", "修羅"])
-            self.assertEqual(ns.difficulty, "修羅")
-        # default is ふつう on simulate
-        self.assertEqual(parser.parse_args(["simulate"]).difficulty, "ふつう")
-        # an unknown choice is rejected by argparse
-        with self.assertRaises(SystemExit):
-            parser.parse_args(["simulate", "--difficulty", "激辛"])
+            ns = parser.parse_args([sub, "--difficulty", "楽園"])
+            self.assertEqual(ns.difficulty, "楽園")
+        # default is 修羅 on simulate
+        self.assertEqual(parser.parse_args(["simulate"]).difficulty, "修羅")
+        # the legacy names are no longer argparse choices (they map via
+        # normalize_difficulty, not the flag) — rejected at the parser
+        for bad in ("激辛", "ふつう", "やさしい"):
+            with self.assertRaises(SystemExit):
+                parser.parse_args(["simulate", "--difficulty", bad])
 
 
 if __name__ == "__main__":

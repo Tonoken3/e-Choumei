@@ -21,24 +21,25 @@ from .world import SEASON_NAMES, WEATHER_NAMES, World
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 
 # ===========================================================================
-# きびしさ (difficulty) — DQの「さくせん」ならぬ難易度。The island's nightly tax is
-# tuned BRUTALLY (every hermit dies within ~19 days) on the canonical ふつう
-# benchmark island. やさしい softens the bleed and hands a small starting cache
-# so a first-time human player (no LLM) can learn the ropes; 修羅 sharpens it.
+# きびしさ (difficulty) — DQの「さくせん」ならぬ難易度。Exactly TWO islands now.
+# 修羅 (carnage) is the canonical benchmark, tuned BRUTALLY (every hermit dies
+# within ~19 days) — the island was already 修羅. 楽園 (paradise) softens the
+# nightly bleed and hands a small starting cache so a first-time human player
+# (no LLM) can learn the ropes.
 #
 # Every number a difficulty touches lives HERE — _daily_decay reads from this
-# table, never from scattered literals. ふつう is the canonical benchmark and its
-# values BYTE-MATCH the pre-difficulty constants (guarded by a test): the 18-day
-# record and all leaderboards stay ふつう-canonical.
+# table, never from scattered literals. 修羅 is the canonical benchmark and its
+# values BYTE-MATCH the pre-difficulty constants (guarded by a test): the survival
+# record and all leaderboards stay 修羅-canonical, the home of every past record.
 #
 # Determinism: difficulty NEVER consumes the RNG — it only scales fixed deltas —
-# so (seed, difficulty) reproduces identically, and ふつう reproduces the exact
+# so (seed, difficulty) reproduces identically, and 修羅 reproduces the exact
 # pre-change run. ``inventory_bonus`` is added to the configured start_inventory.
 # ===========================================================================
-DEFAULT_DIFFICULTY = "ふつう"
+DEFAULT_DIFFICULTY = "修羅"
 
 DIFFICULTY: dict[str, dict[str, object]] = {
-    "やさしい": {
+    "楽園": {  # paradise: the gentler island for first-timers.
         "hunger": -10,
         "water": -14,
         "sanity": -2,            # base nightly sanity (house_upgrade halves to -1)
@@ -49,7 +50,7 @@ DIFFICULTY: dict[str, dict[str, object]] = {
         "winter_sanity": -1,
         "inventory_bonus": {"berries": 3, "wood": 2},
     },
-    "ふつう": {  # EXACTLY the pre-difficulty constants — the canonical benchmark.
+    "修羅": {  # EXACTLY the pre-difficulty constants — the canonical benchmark.
         "hunger": -15,
         "water": -20,
         "sanity": -2,
@@ -60,25 +61,23 @@ DIFFICULTY: dict[str, dict[str, object]] = {
         "winter_sanity": -2,
         "inventory_bonus": {},
     },
-    "修羅": {
-        "hunger": -18,
-        "water": -24,
-        "sanity": -2,
-        "sanity_house": -1,
-        "starvation": -12,
-        "dehydration": -18,
-        "winter_hp": -6,
-        "winter_sanity": -3,
-        "inventory_bonus": {},
-    },
 }
+
+# Legacy aliases: the old three-mode names still resolve so saved scripts,
+# books and command lines keep working — ふつう was the old canonical, which is
+# now 修羅; やさしい was the gentle island, now 楽園.
+_DIFFICULTY_ALIASES = {"ふつう": "修羅", "やさしい": "楽園"}
 
 
 def normalize_difficulty(name: str | None) -> str:
-    """Map an arbitrary string to a known きびしさ, defaulting to ふつう (the
-    canonical benchmark) for None / unknown values so a bad flag never crashes a
-    run — it simply plays the standard island."""
-    return name if name in DIFFICULTY else DEFAULT_DIFFICULTY
+    """Map an arbitrary string to one of the two きびしさ. 楽園/修羅 pass through
+    verbatim; the legacy names ふつう→修羅 and やさしい→楽園 are accepted so old
+    flags/records keep working. None / any unknown value defaults to 修羅 (the
+    canonical benchmark — the island was already 修羅) so a bad flag never
+    crashes a run; it simply plays the standard island."""
+    if name in DIFFICULTY:
+        return name
+    return _DIFFICULTY_ALIASES.get(name, DEFAULT_DIFFICULTY)
 
 
 # The "混乱" voice (spec §4.3): a small pool of disoriented lines so a confused
@@ -107,7 +106,7 @@ class Simulation:
         self.seed = seed
         self.rng = GameRng(seed)
         # きびしさ: the nightly-tax tier. Normalized so an unknown value plays the
-        # canonical ふつう island. The decay numbers all come from DIFFICULTY[...]
+        # canonical 修羅 island. The decay numbers all come from DIFFICULTY[...]
         # so the same (seed, difficulty) reproduces identically.
         self.difficulty = normalize_difficulty(difficulty)
         self.decay = DIFFICULTY[self.difficulty]
@@ -424,8 +423,8 @@ class Simulation:
 
     def _start_inventory(self) -> dict[str, int]:
         """The hermit's opening cache: the configured start_inventory plus the
-        difficulty's ``inventory_bonus`` (やさしい hands a few berries+wood so a
-        first-timer is not starving on day 1; ふつう/修羅 add nothing, so the
+        difficulty's ``inventory_bonus`` (楽園 hands a few berries+wood so a
+        first-timer is not starving on day 1; 修羅 adds nothing, so the
         canonical island is untouched)."""
         inv: dict[str, int] = {
             str(k): int(v) for k, v in self.config.get("start_inventory", {}).items()

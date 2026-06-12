@@ -413,7 +413,7 @@ class OpenAICompatibleBrain:
     def system_prompt_for(self, sim: object) -> str:
         """The full action system message for THIS run — with the settler's
         briefing told truthfully for the sim's きびしさ (so a 修羅 hermit reads the
-        修羅 arithmetic). Falls back to the ふつう SYSTEM_PROMPT when the sim has no
+        修羅 arithmetic). Falls back to the 修羅 SYSTEM_PROMPT when the sim has no
         difficulty (older fakes / a None sim), so back-compat holds."""
         difficulty = getattr(sim, "difficulty", None)
         base = system_prompt_for_difficulty(difficulty) if difficulty else SYSTEM_PROMPT

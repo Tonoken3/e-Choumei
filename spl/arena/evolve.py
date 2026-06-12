@@ -93,7 +93,7 @@ def run_evolve(
     book_dir_cassette: str | None = None,
     player_persona: str | None = None,
     persona_mode: str = "append",
-    difficulty: str = "ふつう",
+    difficulty: str = "修羅",
 ) -> int:
     """Run ``lives`` lives, revising the 家訓 after each. Returns 0 always (the
     lineage is resilient: a dead life is logged and the next is born)."""

@@ -4,7 +4,7 @@ from spl.core.sim import DEFAULT_DIFFICULTY, DIFFICULTY
 # The base contract — everything EXCEPT the settler's briefing, which is now
 # stitched in per-difficulty by settlers_briefing(). Keeping the two halves
 # separate lets the briefing tell the TRUTH for the island actually being played
-# (やさしい/ふつう/修羅) without forking the rest of the prompt.
+# (楽園/修羅) without forking the rest of the prompt.
 _SYSTEM_BASE = """You are the brain of a survival hero on a small island.
 The simulation is the only source of truth. You cannot invent items or change the world.
 Return exactly one JSON object with these keys:
@@ -36,11 +36,11 @@ def settlers_briefing(difficulty: str = DEFAULT_DIFFICULTY) -> str:
     """入植のしおり — the world's LETHAL ARITHMETIC, told to every hermit at
     landing, with the ACTUAL numbers for the island being played.
 
-    The lethal arithmetic must never lie: on 修羅 the bleed is harsher, on
-    やさしい gentler, so these numbers are read straight from the same DIFFICULTY
-    table the sim decays by — the briefing can never drift from the rules. The
-    block is sandwiched between the base contract and the world rules to rebuild
-    the original prompt, byte-identical on ふつう."""
+    The lethal arithmetic must never lie: on 修羅 the bleed is the canonical
+    carnage, on 楽園 gentler, so these numbers are read straight from the same
+    DIFFICULTY table the sim decays by — the briefing can never drift from the
+    rules. The block is sandwiched between the base contract and the world rules
+    to rebuild the original prompt, byte-identical on 修羅."""
     from spl.core.sim import normalize_difficulty
 
     d = DIFFICULTY[normalize_difficulty(difficulty)]
@@ -65,11 +65,11 @@ def settlers_briefing(difficulty: str = DEFAULT_DIFFICULTY) -> str:
 def system_prompt_for_difficulty(difficulty: str = DEFAULT_DIFFICULTY) -> str:
     """The full action system prompt with the settler's briefing told truthfully
     for ``difficulty``. The brains call this (via ``system_prompt_for(sim)``) so a
-    修羅 hermit reads the 修羅 arithmetic, a やさしい hermit the gentle one."""
+    修羅 hermit reads the 修羅 arithmetic, a 楽園 hermit the gentle one."""
     return "\n\n".join((_SYSTEM_BASE, settlers_briefing(difficulty), _SYSTEM_WORLD))
 
 
-# The module-level default (ふつう numbers): back-compat for tests and any caller
+# The module-level default (修羅 numbers): back-compat for tests and any caller
 # that builds a system message without a sim. By construction this is BYTE-FOR-
 # BYTE the original SYSTEM_PROMPT (guarded by a test).
 SYSTEM_PROMPT = system_prompt_for_difficulty(DEFAULT_DIFFICULTY)

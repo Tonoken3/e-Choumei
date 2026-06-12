@@ -923,10 +923,11 @@ class Overlays:
                                   else f.jp("仙人は果てた。", "The hermit fell.")),
             f"{f.jp('得点', 'Score')}: {sim.score()}",
         ]
-        # きびしさ: name the island only when it is NOT the canonical ふつう
-        # benchmark (a record run reads clean; やさしい/修羅 is honestly flagged).
-        difficulty = getattr(sim, "difficulty", "ふつう")
-        if difficulty != "ふつう":
+        # きびしさ: name the island only when it is 楽園 — 修羅 is the canonical
+        # benchmark (records' home), so a record run reads clean and 楽園 is
+        # honestly flagged.
+        difficulty = getattr(sim, "difficulty", "修羅")
+        if difficulty != "修羅":
             info.insert(1, f"{f.jp('きびしさ', 'Difficulty')}: {difficulty}")
         info += [
             f"{f.jp('生存日数', 'Days')}: {hero.days_survived}",
