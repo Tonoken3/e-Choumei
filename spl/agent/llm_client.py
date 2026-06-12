@@ -19,6 +19,7 @@ from .prompts import (
     COMPILE_PROMPT,
     DIARY_PROMPT,
     MOTTO_PROMPT,
+    OVERFLOW_REPAIR_PROMPT,
     REPAIR_PROMPT,
     SYSTEM_PROMPT,
     VERIFY_PROMPT,
@@ -339,6 +340,10 @@ class OpenAICompatibleBrain:
         self.observer = ObservationBuilder()
         self._model: str | None = None
         self._schema_supported = True
+        # 落丁: the finish_reason of the most recent completion. "length" means the
+        # answer was CUT OFF by max_tokens (a long-reasoning model thought too long
+        # and the JSON never closed). Only the serial propose path reads it.
+        self._last_finish_reason: str | None = None
         # 思考予算 telemetry the UIs read.
         self._tps_samples: deque[float] = deque(maxlen=self._TPS_WINDOW)
         self.calls = 0                  # total action-choosing turns
@@ -467,9 +472,13 @@ class OpenAICompatibleBrain:
                     if not proposals:
                         break
         if not proposals:
+            # 落丁: if the parse failure was a max_tokens cut, name the cause so
+            # sim.step() can log "思考が長すぎて言葉にならなかった" — the hermit
+            # reads it next turn and learns to think shorter.
+            args = {"cause": "overflow"} if getattr(last_exc, "overflow", False) else {}
             return GameAction(
                 action="invalid_llm_output",
-                args={},
+                args=args,
                 think=f"Could not parse LLM JSON: {last_exc}",
                 say="The words came apart in my hands.",
             )
@@ -675,20 +684,37 @@ class OpenAICompatibleBrain:
         first, tokens, _elapsed = self._chat_timed(
             messages, schema=schema, max_tokens=cap, record_tps=record_tps
         )
+        # 落丁: did this completion get CUT OFF by max_tokens? Captured on the
+        # SERIAL propose path right after _post_chat stashed it. A length cut means
+        # the model thought too long and the JSON never closed.
+        overflowed = self._last_finish_reason == "length"
         try:
             return parse_action_text(first).to_game_action(), tokens
         except ActionParseError as exc:
             if not budget.repair:
-                # 雲水: no repair budget — straight to invalid_llm_output.
+                # 雲水: no repair budget — straight to invalid_llm_output. Mark the
+                # length cut so choose() can name the cause in the world log.
+                exc.overflow = overflowed
                 raise
+            # Overflow-aware repair: when the first answer was a length cut, give
+            # direct meta-feedback (think in three sentences, then close the JSON)
+            # instead of the generic "not valid JSON" nudge.
+            repair_prompt = OVERFLOW_REPAIR_PROMPT if overflowed else REPAIR_PROMPT
             repair_messages = messages + [
                 {"role": "assistant", "content": first},
-                {"role": "user", "content": REPAIR_PROMPT + f"\nError: {exc}"},
+                {"role": "user", "content": repair_prompt + f"\nError: {exc}"},
             ]
             repaired, rtokens, _e = self._chat_timed(
                 repair_messages, schema=schema, max_tokens=cap, record_tps=record_tps
             )
-            return parse_action_text(repaired).to_game_action(), tokens + rtokens
+            # If the repair ALSO got cut off, the overflow signal persists so the
+            # raised error still names the cause as "overflow".
+            repair_overflowed = self._last_finish_reason == "length"
+            try:
+                return parse_action_text(repaired).to_game_action(), tokens + rtokens
+            except ActionParseError as rexc:
+                rexc.overflow = overflowed or repair_overflowed
+                raise
 
     def _verify(
         self,
@@ -943,7 +969,12 @@ class OpenAICompatibleBrain:
         except urllib.error.URLError as exc:
             raise RuntimeError(f"LLM request failed: {exc}") from exc
         data = json.loads(body)
-        message = data["choices"][0]["message"]
+        choice = data["choices"][0]
+        # 落丁検出: stash WHY the completion stopped. Only meaningful on the SERIAL
+        # propose path (choose()): the threaded 八識 lens calls may overwrite this
+        # concurrently, but lenses never repair, so the race is acceptable.
+        self._last_finish_reason = choice.get("finish_reason")
+        message = choice["message"]
         content = message.get("content") or ""
         if not content.strip():
             # Reasoning models (e.g. Qwen3.x on LM Studio) leave content empty and

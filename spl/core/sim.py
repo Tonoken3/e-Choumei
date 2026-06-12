@@ -127,6 +127,17 @@ class Simulation:
         # Make it confusion unconditionally so the world keeps turning no matter
         # how the brain is wired (spec §4.3: クラッシュは存在しない).
         if request.action not in ACTION_WORDS:
+            # 落丁フィードバック: a length-cut completion (the brain thought too long
+            # and the JSON ran off the page) surfaces here as invalid_llm_output
+            # carrying cause=overflow. Name it so the hermit reads WHY in the recent
+            # window next turn — and learns to think shorter — instead of the
+            # generic "Unknown action" message.
+            if (
+                request.action == "invalid_llm_output"
+                and isinstance(request.args, dict)
+                and request.args.get("cause") == "overflow"
+            ):
+                return self.confuse("思考が長すぎて言葉にならなかった (thought overflow)")
             return self.confuse(f"Unknown action: {request.action}")
         if self.hero.sanity <= 7 and self.rng.chance(0.20):
             return self.confuse("Sanity collapsed into static.")

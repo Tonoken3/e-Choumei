@@ -9,7 +9,10 @@ from spl.core.actions import ACTION_WORDS, GameAction
 
 
 class ActionParseError(ValueError):
-    pass
+    # 落丁: set True by the propose path when the unparseable output was a
+    # max_tokens cut (finish_reason=length), so choose() can name the cause
+    # ("overflow") in the GameAction it hands to the world.
+    overflow: bool = False
 
 
 @dataclass(frozen=True)

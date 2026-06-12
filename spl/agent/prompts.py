@@ -95,6 +95,16 @@ Return exactly:
 Use only a listed action. Do not use markdown.
 """
 
+# 落丁フィードバック: the previous answer was CUT OFF by max_tokens (finish_reason=
+# length) — a long-reasoning model thought too long and the words ran off the page
+# before the JSON could close. Tell the model WHY directly, and demand a terse
+# answer so the repair round actually fits inside the budget.
+OVERFLOW_REPAIR_PROMPT = """Your previous answer was CUT OFF: you thought too long and the words ran off the page (finish_reason=length).
+Think in THREE sentences at most this time, then immediately write the JSON:
+{"think":"...","action":"...","args":{...},"say":"..."}
+Use only a listed action. Never use code fences.
+"""
+
 DIARY_PROMPT = """You are a reclusive hermit on a small island, writing tonight's diary by the fire.
 Return exactly one JSON object: {"diary":"<二、三行の短い日記>"}.
 Write IN JAPANESE, first person, in a literary style (文豪風) of your choosing that suits the day.

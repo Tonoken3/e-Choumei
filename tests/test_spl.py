@@ -2379,6 +2379,136 @@ class ConcurrentCandidateTests(unittest.TestCase):
         self.assertEqual(find_cassette(path, "Gemma仙人MTP").parallel, 8)
 
 
+class _OverflowStubBrain:
+    """An OpenAICompatibleBrain whose ONLY network seam (_post_chat) is mocked to
+    simulate a long-reasoning model whose completion is CUT OFF by max_tokens
+    (finish_reason=length, empty/unparseable content). Each call sets
+    self._last_finish_reason exactly as the real _post_chat would, and records the
+    last user message of every call so the repair prompt used can be asserted.
+
+    ``cut`` controls how many of the FIRST calls return a length-cut empty body;
+    after that, calls return a valid action JSON (finish_reason=stop). With cut=1
+    the first proposal overflows and the repair round succeeds; with cut=99 every
+    call overflows so the turn falls through to invalid_llm_output."""
+
+    @staticmethod
+    def make(cut: int = 1, tps: float = 80.0, length_failure: bool = True):
+        from spl.agent.llm_client import Cassette, OpenAICompatibleBrain
+
+        class _Brain(OpenAICompatibleBrain):
+            def __init__(self):
+                super().__init__(Cassette(
+                    name="of", base_url="http://stub/v1", tps=tps,
+                ))
+                self._calls = 0
+                self.user_messages: list[str] = []  # last user content per call
+
+            def _resolve_model(self):
+                return "stub-model"
+
+            def _post_chat(self, payload):
+                import json as _json
+
+                self._calls += 1
+                self.user_messages.append(payload["messages"][-1]["content"])
+                if self._calls <= cut:
+                    # Cut off: empty (unparseable) content. The finish_reason is set
+                    # exactly as the real _post_chat would on a max_tokens cut.
+                    self._last_finish_reason = "length" if length_failure else "stop"
+                    body = "" if length_failure else "garbled not json"
+                    return body, 0
+                # Recovery: a valid action, completion ran to a clean stop.
+                self._last_finish_reason = "stop"
+                body = _json.dumps(
+                    {"think": "短く", "action": "rest", "args": {}, "say": "休む"},
+                    ensure_ascii=False,
+                )
+                return body, 20
+
+        return _Brain()
+
+
+class RakuchouFeedbackTests(unittest.TestCase):
+    """落丁フィードバック — when a completion is cut by max_tokens, the brain is
+    told WHY (overflow-aware repair) and the cut is named in the world log.
+    Mock transport only; no live calls to :1234 / :8011."""
+
+    def _sim(self, **stat_overrides):
+        sim = Simulation(seed=42, max_days=112)
+        for k, v in stat_overrides.items():
+            setattr(sim.hero, k, v)
+        return sim
+
+    def test_length_cut_repair_uses_overflow_prompt(self) -> None:
+        from spl.agent.prompts import OVERFLOW_REPAIR_PROMPT
+
+        # 行者 (tps 80) has a repair budget. First proposal is length-cut (empty),
+        # so the repair round must use the OVERFLOW_REPAIR_PROMPT.
+        brain = _OverflowStubBrain.make(cut=1, tps=80.0)
+        action = brain.choose(self._sim())
+        self.assertEqual(action.action, "rest")  # the repair recovered
+        # Two calls: the cut proposal + the repair. The repair's user message is the
+        # overflow-aware prompt, not the plain one.
+        self.assertEqual(len(brain.user_messages), 2)
+        self.assertIn(OVERFLOW_REPAIR_PROMPT, brain.user_messages[1])
+
+    def test_repeated_length_cut_yields_overflow_cause(self) -> None:
+        # Both the proposal AND the repair are length-cut → choose() returns
+        # invalid_llm_output carrying args.cause == "overflow".
+        brain = _OverflowStubBrain.make(cut=99, tps=80.0)
+        action = brain.choose(self._sim())
+        self.assertEqual(action.action, "invalid_llm_output")
+        self.assertEqual(action.args.get("cause"), "overflow")
+
+    def test_sim_step_logs_thought_overflow_confusion(self) -> None:
+        # sim.step on an overflow invalid_llm_output logs the named confusion reason.
+        sim = self._sim()
+        action = GameAction(
+            action="invalid_llm_output",
+            args={"cause": "overflow"},
+            think="cut off",
+            say="",
+        )
+        sim.step(action)
+        self.assertTrue(
+            any("思考が長すぎて言葉にならなかった" in line for line in sim.full_log),
+            sim.full_log,
+        )
+        # It is a confusion (a wasted turn), not a generic Unknown-action message.
+        self.assertEqual(sim.hero.confusion_count, 1)
+        self.assertFalse(
+            any("Unknown action" in line for line in sim.full_log), sim.full_log
+        )
+
+    def test_non_length_parse_failure_uses_plain_repair(self) -> None:
+        from spl.agent.prompts import OVERFLOW_REPAIR_PROMPT, REPAIR_PROMPT
+
+        # A NON-length parse failure (finish_reason=stop, garbled body): the repair
+        # round must use the plain REPAIR_PROMPT, never the overflow one.
+        brain = _OverflowStubBrain.make(cut=1, tps=80.0, length_failure=False)
+        action = brain.choose(self._sim())
+        self.assertEqual(action.action, "rest")
+        self.assertEqual(len(brain.user_messages), 2)
+        self.assertIn(REPAIR_PROMPT, brain.user_messages[1])
+        self.assertNotIn(OVERFLOW_REPAIR_PROMPT, brain.user_messages[1])
+
+    def test_non_length_failure_has_no_overflow_cause(self) -> None:
+        # Every call garbled but NOT length-cut → invalid_llm_output with NO cause,
+        # and sim.step logs the generic Unknown-action confusion (not overflow).
+        brain = _OverflowStubBrain.make(cut=99, tps=80.0, length_failure=False)
+        action = brain.choose(self._sim())
+        self.assertEqual(action.action, "invalid_llm_output")
+        self.assertNotIn("cause", action.args)
+        sim = self._sim()
+        sim.step(action)
+        self.assertTrue(
+            any("Unknown action" in line for line in sim.full_log), sim.full_log
+        )
+        self.assertFalse(
+            any("思考が長すぎて" in line for line in sim.full_log), sim.full_log
+        )
+
+
 if __name__ == "__main__":
     unittest.main()
 
