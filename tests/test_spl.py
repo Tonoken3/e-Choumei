@@ -2538,7 +2538,7 @@ class _PersonaStubBrain:
 
                 system = payload["messages"][0]["content"]
                 self.systems.append(system)
-                if system.startswith(DIARY_PROMPT):
+                if DIARY_PROMPT in system:
                     return _json.dumps({"diary": "今日も生きた。"}, ensure_ascii=False), 20
                 return _json.dumps(
                     {"think": "案", "action": "rest", "args": {}, "say": "休む"},
@@ -2667,6 +2667,52 @@ class NyushokushaPersonaTests(unittest.TestCase):
 
         entry = build_entry(self._sim(), seed=42, motto=None)
         self.assertEqual(entry["persona"], "")
+
+
+class PersonaPresetTests(unittest.TestCase):
+    """来歴プリセット(DQ性格オマージュ) + 140字制限 + 冒頭注入。"""
+
+    def test_presets_exist_and_fit_in_a_tweet(self) -> None:
+        from spl.agent.prompts import PERSONA_PRESETS
+
+        self.assertEqual(set(PERSONA_PRESETS), {"ごうけつ", "ひたむき", "こわがり", "まえむき"})
+        for name, text in PERSONA_PRESETS.items():
+            self.assertLessEqual(len(text), 140, name)
+
+    def test_persona_is_injected_at_the_head(self) -> None:
+        from spl.agent.llm_client import Cassette, OpenAICompatibleBrain
+        from spl.agent.prompts import SYSTEM_PROMPT
+
+        brain = OpenAICompatibleBrain(Cassette(name="x", base_url="http://stub/v1", persona="土台人格"))
+        brain.player_persona = "汝は試験の仙人。"
+        brain.persona_mode = "append"
+        text = brain.system_for(SYSTEM_PROMPT)
+        self.assertTrue(text.startswith("[入植者の来歴"))
+        self.assertIn("汝は試験の仙人。", text.split("\n")[1])
+        self.assertIn("土台人格", text)
+
+    def test_over_140_is_rejected(self) -> None:
+        from types import SimpleNamespace
+
+        from spl.agent.llm_client import Cassette, OpenAICompatibleBrain
+        from spl.ui.cli import apply_persona
+
+        brain = OpenAICompatibleBrain(Cassette(name="x", base_url="http://stub/v1"))
+        args = SimpleNamespace(persona="あ" * 141, persona_replace=None, persona_preset=None)
+        with self.assertRaises(SystemExit):
+            apply_persona(brain, args)
+
+    def test_preset_flag_wires_the_text(self) -> None:
+        from types import SimpleNamespace
+
+        from spl.agent.llm_client import Cassette, OpenAICompatibleBrain
+        from spl.agent.prompts import PERSONA_PRESETS
+        from spl.ui.cli import apply_persona
+
+        brain = OpenAICompatibleBrain(Cassette(name="x", base_url="http://stub/v1"))
+        args = SimpleNamespace(persona=None, persona_replace=None, persona_preset="こわがり")
+        apply_persona(brain, args)
+        self.assertEqual(brain.player_persona, PERSONA_PRESETS["こわがり"])
 
 
 if __name__ == "__main__":

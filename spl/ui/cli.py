@@ -311,6 +311,18 @@ def apply_persona(brain: object | None, args: object) -> None:
         return
     replace_text = getattr(args, "persona_replace", None)
     append_text = getattr(args, "persona", None)
+    preset = getattr(args, "persona_preset", None)
+    if preset is not None:
+        from spl.agent.prompts import PERSONA_PRESETS
+
+        brain.player_persona = PERSONA_PRESETS[preset]
+        brain.persona_mode = "append"
+        return
+    text = replace_text if replace_text is not None else append_text
+    if text is not None and len(text) > 140:
+        raise SystemExit(
+            f"来歴は140字以内です（X投稿と同じ。いまは{len(text)}字）。魂は短く、深く。"
+        )
     if replace_text is not None:
         brain.player_persona = replace_text
         brain.persona_mode = "replace"

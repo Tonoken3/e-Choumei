@@ -150,6 +150,12 @@ def _add_persona(parser: argparse.ArgumentParser) -> None:
         default=None,
         help="入植者の来歴: カセットの人格を完全に置き換える来歴を綴る",
     )
+    group.add_argument(
+        "--persona-preset",
+        default=None,
+        choices=["ごうけつ", "ひたむき", "こわがり", "まえむき"],
+        help="来歴プリセット（じぶんで書くなら --persona）",
+    )
 
 
 def run_pixel(args: object) -> int:

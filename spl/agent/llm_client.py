@@ -395,6 +395,20 @@ class OpenAICompatibleBrain:
             )
         return own
 
+    def system_for(self, base: str) -> str:
+        """Assemble a system message. The player-written 来歴 (≤140 chars, X-post
+        sized) is injected at the HEAD of EVERY call — identity precedes law —
+        then the base prompt, then the cassette persona (unless replace mode)."""
+        player = (self.player_persona or "").strip()[:140]
+        parts: list[str] = []
+        if player:
+            parts.append("[入植者の来歴 — the watcher wrote this about you. It is who you are.]\n" + player)
+        parts.append(base)
+        if not (player and self.persona_mode == "replace"):
+            if self.cassette.persona:
+                parts.append(self.cassette.persona)
+        return "\n".join(parts)
+
     def avg_tps(self) -> float:
         """Rolling average TPS over the last calls. Forced TPS overrides it.
         Until 2 real samples exist, fall back to the 行者 default (80)."""
@@ -458,7 +472,7 @@ class OpenAICompatibleBrain:
         self.tier_history.append(budget.name)
         obs = self.observer.build(sim)
         messages = [
-            {"role": "system", "content": SYSTEM_PROMPT + "\n" + self.effective_persona()},
+            {"role": "system", "content": self.system_for(SYSTEM_PROMPT)},
             {"role": "user", "content": json.dumps(obs, ensure_ascii=False)},
         ]
         if extra:
@@ -535,7 +549,7 @@ class OpenAICompatibleBrain:
         skipped, never crashing the turn. ``max_tokens`` gives reasoning models
         breathing space before the JSON closes — paid honestly in wall-clock."""
         messages = [
-            {"role": "system", "content": lens_prompt(lens, theme) + "\n" + self.effective_persona()},
+            {"role": "system", "content": self.system_for(lens_prompt(lens, theme))},
             {"role": "user", "content": obs_json},
         ]
         cap = max(160, self.cassette.max_tokens)
@@ -601,7 +615,7 @@ class OpenAICompatibleBrain:
         # 阿頼耶識: one schema-forced action with the observation + the N counsels.
         counsel_block = "\n".join(f"【{lens}】{text}" for lens, text in counsels)
         messages = [
-            {"role": "system", "content": SYSTEM_PROMPT + "\n" + self.effective_persona()},
+            {"role": "system", "content": self.system_for(SYSTEM_PROMPT)},
             {"role": "user", "content": obs_json},
             {
                 "role": "user",
@@ -663,7 +677,7 @@ class OpenAICompatibleBrain:
         before the model answers. Raises ActionParseError on unparseable output."""
         budget = budget or self.current_tier()
         messages = [
-            {"role": "system", "content": SYSTEM_PROMPT + "\n" + self.effective_persona()},
+            {"role": "system", "content": self.system_for(SYSTEM_PROMPT)},
             {"role": "user", "content": json.dumps(obs, ensure_ascii=False)},
         ]
         if extra:
@@ -675,7 +689,7 @@ class OpenAICompatibleBrain:
         """One free-text (no-schema) call — the 'think' half of a relay. Returns
         the raw content (think tags and all); callers use it as plan/ruling text."""
         messages = [
-            {"role": "system", "content": system + "\n" + self.effective_persona()},
+            {"role": "system", "content": self.system_for(system)},
             {"role": "user", "content": user},
         ]
         return self._chat(messages, schema=None, max_tokens=max_tokens).strip()
@@ -762,7 +776,7 @@ class OpenAICompatibleBrain:
             for p in proposals
         ]
         verify_messages = [
-            {"role": "system", "content": VERIFY_PROMPT + "\n" + self.effective_persona()},
+            {"role": "system", "content": self.system_for(VERIFY_PROMPT)},
             {
                 "role": "user",
                 "content": json.dumps(
@@ -794,7 +808,7 @@ class OpenAICompatibleBrain:
             "today": day_log[-8:],
         }
         messages = [
-            {"role": "system", "content": DIARY_PROMPT + "\n" + self.effective_persona()},
+            {"role": "system", "content": self.system_for(DIARY_PROMPT)},
             {"role": "user", "content": json.dumps(context, ensure_ascii=False)},
         ]
         raw = self._chat(messages, schema=_diary_schema()).strip()
@@ -830,7 +844,7 @@ class OpenAICompatibleBrain:
             "diary_tail": [entry.text for entry in sim.memory.diary[-4:]],
         }
         messages = [
-            {"role": "system", "content": MOTTO_PROMPT + "\n" + self.effective_persona()},
+            {"role": "system", "content": self.system_for(MOTTO_PROMPT)},
             {"role": "user", "content": json.dumps(context, ensure_ascii=False)},
         ]
         raw = self._chat(messages, schema=_motto_schema(), max_tokens=768).strip()
@@ -868,7 +882,7 @@ class OpenAICompatibleBrain:
             "history": book.history_table(),
         }
         messages = [
-            {"role": "system", "content": COMPILE_PROMPT + "\n" + self.effective_persona()},
+            {"role": "system", "content": self.system_for(COMPILE_PROMPT)},
             {"role": "user", "content": json.dumps(context, ensure_ascii=False)},
         ]
         try:
