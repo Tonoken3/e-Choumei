@@ -1722,6 +1722,16 @@ class PremonitionTests(unittest.TestCase):
         self.assertNotIn("premonition", obs)
 
 
+class SettlerBriefingTests(unittest.TestCase):
+    """入植のしおり: the lethal arithmetic is disclosed at landing."""
+
+    def test_system_prompt_discloses_the_laws(self) -> None:
+        from spl.agent.prompts import SYSTEM_PROMPT
+
+        for law in ("112 days", "HP reaches 0", "hunger -15", "water -20", "Winter"):
+            self.assertIn(law, SYSTEM_PROMPT)
+
+
 if __name__ == "__main__":
     unittest.main()
 
