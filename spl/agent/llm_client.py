@@ -5,6 +5,7 @@ import time
 import tomllib
 import urllib.error
 import urllib.request
+from concurrent.futures import ThreadPoolExecutor
 from collections import deque
 from dataclasses import dataclass
 from pathlib import Path
@@ -14,12 +15,15 @@ from spl.core.actions import ACTION_WORDS, GameAction
 
 from .observer import ObservationBuilder
 from .prompts import (
+    AGGREGATE_PROMPT,
     COMPILE_PROMPT,
     DIARY_PROMPT,
     MOTTO_PROMPT,
     REPAIR_PROMPT,
     SYSTEM_PROMPT,
     VERIFY_PROMPT,
+    lens_prompt,
+    lenses_for,
 )
 from .schema import (
     ActionParseError,
@@ -43,6 +47,10 @@ class Cassette:
     # each completion; >0 = force a constant TPS (measurement ignored), so a slow
     # or fast rig can be simulated without changing the hardware.
     tps: float = 0.0
+    # 八識熟考: N (0=off) concurrent inference streams over ONE observation, each a
+    # themed lens (八識), aggregated into one action. A silicon mind is PARALLEL —
+    # with continuous batching (vLLM) N thoughts cost ~1 thought of wall-clock.
+    parallel: int = 0
 
 
 def load_cassettes(path: Path) -> list[Cassette]:
@@ -61,6 +69,7 @@ def load_cassettes(path: Path) -> list[Cassette]:
                 json_mode=bool(row.get("json_mode", True)),
                 persona=row.get("persona", ""),
                 tps=float(row.get("tps", 0.0)),
+                parallel=int(row.get("parallel", 0)),
             )
         )
     return cassettes
@@ -142,6 +151,60 @@ def tier_for_tps(tps: float) -> ThinkingBudget:
     return _TIERS[3]
 
 
+def _has_cjk(s: str) -> bool:
+    return any("぀" <= ch <= "鿿" or "ｦ" <= ch <= "ﾟ" for ch in s)
+
+
+def _clean_counsel(content: str | None) -> str | None:
+    """Pull a usable two-sentence counsel out of a lens reply.
+
+    A clean model returns the two Japanese sentences directly (passed through). A
+    reasoning model (e.g. the abliterated Qwen on vLLM) prefixes an English
+    'Here's a thinking process:' trace; we drop strip-prefix think-fences and, if
+    the head is an English trace, keep only the Japanese tail lines. Returns None
+    when nothing usable remains (the lens is then skipped)."""
+    if not content:
+        return None
+    text = content.strip()
+    # strip a leading <think>...</think> fence if present
+    if "</think>" in text:
+        text = text.split("</think>", 1)[1].strip()
+    if not text:
+        return None
+    # If the whole reply carries CJK and no obvious English reasoning preamble,
+    # keep it as-is (the clean-model path).
+    head = text[:40].lower()
+    leaked = ("thinking process" in text.lower()[:80]) or head.startswith(
+        ("here's", "here is", "okay", "let me", "first", "1.")
+    )
+    if not leaked:
+        return text or None
+    # Reasoning leaked: keep only the Japanese lines (the actual counsel, if any
+    # was emitted before truncation).
+    jp_lines = [ln.strip() for ln in text.splitlines() if _has_cjk(ln) and ln.strip()]
+    # drop lines that are clearly part of the English analysis (key: value echoes)
+    jp_lines = [ln for ln in jp_lines if not ln.lower().startswith(("**", "- ", "* "))]
+    tail = " ".join(jp_lines[-2:]).strip()
+    return tail or None
+
+
+def _parse_counsel(content: str | None) -> str | None:
+    """Extract the 'counsel' field from a lens reply. The schema makes the server
+    emit {"counsel": "..."}; we read the first balanced object that carries it.
+    Falls back to _clean_counsel for a backend that dropped the schema (older
+    servers) and returned free text instead."""
+    if not content:
+        return None
+    for candidate in _iter_balanced_objects(content):
+        try:
+            obj = json.loads(_remove_trailing_commas(candidate))
+        except json.JSONDecodeError:
+            continue
+        if isinstance(obj, dict) and obj.get("counsel"):
+            return str(obj["counsel"]).strip() or None
+    return _clean_counsel(content)
+
+
 def _same_action(a: GameAction, b: GameAction) -> bool:
     """True when two actions are effectively identical (the verify pass made no
     correction). Compares the verb and its args, ignoring think/say flavour."""
@@ -168,6 +231,24 @@ def _action_schema(budget: ThinkingBudget | None = None) -> dict[str, Any]:
                 "say": {"type": "string", "maxLength": say_len},
             },
             "required": ["think", "action", "args", "say"],
+        },
+    }
+
+
+def _counsel_schema() -> dict[str, Any]:
+    """八識の進言 schema: one short Japanese field. maxLength is load-bearing —
+    a grammar-constrained server is forced to CLOSE the string, so a reasoning
+    model cannot burn its whole budget on a 'thinking process' and emit only a
+    truncated trace (observed on the abliterated Qwen). The lens counsel becomes
+    the actual two-sentence advice, not a leaked analysis."""
+    return {
+        "name": "lens_counsel",
+        "strict": True,
+        "schema": {
+            "type": "object",
+            "additionalProperties": False,
+            "properties": {"counsel": {"type": "string", "maxLength": 160}},
+            "required": ["counsel"],
         },
     }
 
@@ -257,11 +338,22 @@ class OpenAICompatibleBrain:
         self.calls = 0                  # total action-choosing turns
         self.verify_corrections = 0     # times the VERIFY pass changed the action
         self.tier_history: list[str] = []  # tier name chosen per turn
+        # 八識熟考 telemetry.
+        self.deliberations = 0          # times deliberate() fanned out the eight識
+        self.last_counsels: list[tuple[str, str]] = []  # last fan-out's counsels
+        # UI toggle mirror: when True, choose_or_deliberate fans out even with no
+        # body scream (the [熟考] watch button / CLI --deliberate set this).
+        self.deliberate_forced = False
 
     # -- 思考予算: tokens/sec → tier ----------------------------------------
     @property
     def forced_tps(self) -> float:
         return max(0.0, float(getattr(self.cassette, "tps", 0.0) or 0.0))
+
+    @property
+    def parallel(self) -> int:
+        """八識熟考 fan-out width (0 = off)."""
+        return max(0, int(getattr(self.cassette, "parallel", 0) or 0))
 
     def avg_tps(self) -> float:
         """Rolling average TPS over the last calls. Forced TPS overrides it.
@@ -284,12 +376,25 @@ class OpenAICompatibleBrain:
         note = getattr(self, "condition_note", None)
         if eff and note and eff != name:
             name = f"{name}→{eff}({note})"
-        return f"{name} {self.avg_tps():.0f}t/s 検証修正{self.verify_corrections}"
+        line = f"{name} {self.avg_tps():.0f}t/s 検証修正{self.verify_corrections}"
+        # 八識熟考: surface how many parallel deliberations have fired this run.
+        if self.deliberations > 0:
+            line += f" 熟考{self.deliberations}"
+        return line
 
     def _record_tps(self, completion_tokens: int, seconds: float) -> None:
         if self.forced_tps > 0 or seconds <= 0 or completion_tokens <= 0:
             return
         self._tps_samples.append(completion_tokens / seconds)
+
+    def _record_tps_aggregate(self, completion_tokens: int, seconds: float) -> None:
+        """八識熟考-honest TPS: feed ONE rolling sample whose tokens are the SUM of
+        every call's completion tokens across the fan-out and whose seconds are the
+        WHOLE fan-out's wall-clock. That ratio is the serving stack's real
+        throughput under continuous batching, so batching legitimately EARNS a
+        higher tier. deliberate() suppresses per-call recording (see ``_chat``'s
+        ``record_tps`` flag) so nothing is double-counted."""
+        self._record_tps(completion_tokens, seconds)
 
     def choose(
         self, sim: object, extra: list[dict[str, str]] | None = None
@@ -345,6 +450,131 @@ class OpenAICompatibleBrain:
                 return verified
         return proposals[0]
 
+    # -- 八識熟考 (parallel deliberation) -------------------------------------
+    def _lens_counsel(
+        self, lens: str, theme: str, obs_json: str, tokens_out: dict[str, int]
+    ) -> str | None:
+        """One識's counsel: a SHORT schema-forced call reading the same observation
+        through one themed lens. The one-field {counsel} schema makes a grammar-
+        constrained server CLOSE the string, so even a reasoning model emits the
+        two-sentence advice instead of a truncated thinking trace. Records the
+        completion tokens into ``tokens_out`` (keyed by lens) for the aggregate-TPS
+        sum. Per-call TPS is OFF; failures return None so a dead lens is simply
+        skipped, never crashing the turn. ``max_tokens`` gives reasoning models
+        breathing space before the JSON closes — paid honestly in wall-clock."""
+        messages = [
+            {"role": "system", "content": lens_prompt(lens, theme) + "\n" + self.cassette.persona},
+            {"role": "user", "content": obs_json},
+        ]
+        cap = max(160, self.cassette.max_tokens)
+        try:
+            content, tokens, _elapsed = self._chat_timed(
+                messages, schema=_counsel_schema(), max_tokens=cap, record_tps=False
+            )
+        except Exception:  # noqa: BLE001 - one dead stream must not sink the turn
+            return None
+        tokens_out[lens] = tokens
+        return _parse_counsel(content)
+
+    def deliberate(self, sim: object) -> GameAction:
+        """八識熟考: build the observation ONCE, fan out N CONCURRENT lens counsels
+        (八識), then synthesize ONE schema-forced action (阿頼耶識) that reuses the
+        normal _propose machinery (tier think/say bounds, breathing space, repair).
+
+        The whole fan-out is timed as one unit: the aggregate TPS = (sum of all
+        N+1 completion tokens) / (wall-clock of the entire deliberation), fed once
+        to the rolling samples — so batching legitimately earns its tier. A body
+        is serial; a silicon mind is parallel."""
+        self.calls += 1
+        self.deliberations += 1
+        # Effective tier is condition-capped exactly like choose() — a starving
+        # mind fans out but synthesizes poorly.
+        budget = self.current_tier()
+        cap_idx, cap_reason = condition_cap_index(sim.hero)
+        hw_idx = _TIERS.index(budget)
+        if cap_idx < hw_idx:
+            budget = _TIERS[cap_idx]
+            self.condition_note = cap_reason
+        else:
+            self.condition_note = None
+        self.effective_tier_name = budget.name
+        self.tier_history.append(budget.name)
+
+        obs = self.observer.build(sim)
+        obs_json = json.dumps(obs, ensure_ascii=False)
+        lenses = lenses_for(self.parallel)
+
+        # The deliberation's wall-clock spans the whole fan-out + the aggregate.
+        started = time.monotonic()
+        token_sum = 0
+        counsels: list[tuple[str, str]] = []
+        lens_tokens: dict[str, int] = {}
+        # Fan out CONCURRENTLY: one request per thread (urllib is thread-safe per
+        # request). vLLM continuous batching makes the eight cost ~one wall-clock.
+        if lenses:
+            with ThreadPoolExecutor(max_workers=len(lenses)) as pool:
+                futures = [
+                    (lens, pool.submit(self._lens_counsel, lens, theme, obs_json, lens_tokens))
+                    for lens, theme in lenses
+                ]
+                for lens, fut in futures:
+                    try:
+                        text = fut.result(timeout=self.timeout + 5.0)
+                    except Exception:  # noqa: BLE001 - per-thread timeout/error → skip
+                        text = None
+                    if text:
+                        counsels.append((lens, text))
+        token_sum += sum(lens_tokens.values())
+
+        # 阿頼耶識: one schema-forced action with the observation + the N counsels.
+        counsel_block = "\n".join(f"【{lens}】{text}" for lens, text in counsels)
+        messages = [
+            {"role": "system", "content": SYSTEM_PROMPT + "\n" + self.cassette.persona},
+            {"role": "user", "content": obs_json},
+            {
+                "role": "user",
+                "content": AGGREGATE_PROMPT
+                + ("\n八識の進言:\n" + counsel_block if counsel_block else "")
+                + "\n八識の進言を統合し、最善の一手を返せ。",
+            },
+        ]
+        try:
+            action, agg_tokens = self._propose_timed(messages, budget, record_tps=False)
+        except ActionParseError as exc:
+            action = GameAction(
+                action="invalid_llm_output",
+                args={},
+                think=f"Could not parse LLM JSON: {exc}",
+                say="The words came apart in my hands.",
+            )
+            agg_tokens = 0
+        token_sum += agg_tokens
+
+        # Aggregate-TPS honesty: one rolling sample for the WHOLE deliberation.
+        elapsed = time.monotonic() - started
+        self._record_tps_aggregate(token_sum, elapsed)
+        # Stash the counsels so a UI/smoke can show what the eight識 said.
+        self.last_counsels = counsels
+        return action
+
+    def choose_or_deliberate(self, sim: object) -> GameAction:
+        """The single entry both UIs call. 八識熟考 fires when the cassette has
+        ``parallel > 0`` AND (the toggle/CLI forced it OR the flesh is screaming:
+        a ``body`` block in the observation summons full attention — biology).
+        Otherwise the normal serial choose()."""
+        if self.parallel > 0 and (self.deliberate_forced or self._body_screams_present(sim)):
+            return self.deliberate(sim)
+        return self.choose(sim)
+
+    def _body_screams_present(self, sim: object) -> bool:
+        """True when the observation would carry a ``body`` block (the flesh is
+        screaming). Reuses the observer's own interoception so the trigger and the
+        prompt agree exactly."""
+        try:
+            return bool(self.observer._body_screams(sim))
+        except Exception:  # noqa: BLE001
+            return False
+
     # -- MAGI seams ----------------------------------------------------------
     # The MAGI council reuses one OpenAICompatibleBrain per seat (sharing all of
     # the schema / parse / TPS machinery here). These two methods are the minimal
@@ -385,10 +615,24 @@ class OpenAICompatibleBrain:
         exceeds the tier budget: long-reasoning models (hidden reasoning_content
         before any JSON) suffocate under small caps; their real cost is paid in
         wall-clock time, which the TPS measurement keeps honest."""
+        action, _tokens = self._propose_timed(messages, budget, record_tps=True)
+        return action
+
+    def _propose_timed(
+        self, messages: list[dict[str, str]], budget: ThinkingBudget,
+        record_tps: bool = True,
+    ) -> tuple[GameAction, int]:
+        """``_propose`` plus the summed completion tokens of its call(s), and a
+        ``record_tps`` switch. 八識熟考's aggregator calls this with
+        ``record_tps=False`` so the per-call TPS is not double-counted against the
+        single aggregate sample deliberate() records for the whole fan-out."""
         cap = max(budget.max_tokens, self.cassette.max_tokens)
-        first = self._chat(messages, schema=_action_schema(budget), max_tokens=cap)
+        schema = _action_schema(budget)
+        first, tokens, _elapsed = self._chat_timed(
+            messages, schema=schema, max_tokens=cap, record_tps=record_tps
+        )
         try:
-            return parse_action_text(first).to_game_action()
+            return parse_action_text(first).to_game_action(), tokens
         except ActionParseError as exc:
             if not budget.repair:
                 # 雲水: no repair budget — straight to invalid_llm_output.
@@ -397,10 +641,10 @@ class OpenAICompatibleBrain:
                 {"role": "assistant", "content": first},
                 {"role": "user", "content": REPAIR_PROMPT + f"\nError: {exc}"},
             ]
-            repaired = self._chat(
-                repair_messages, schema=_action_schema(budget), max_tokens=cap
+            repaired, rtokens, _e = self._chat_timed(
+                repair_messages, schema=schema, max_tokens=cap, record_tps=record_tps
             )
-            return parse_action_text(repaired).to_game_action()
+            return parse_action_text(repaired).to_game_action(), tokens + rtokens
 
     def _verify(
         self,
@@ -576,7 +820,25 @@ class OpenAICompatibleBrain:
         messages: list[dict[str, str]],
         schema: dict[str, Any] | None = None,
         max_tokens: int | None = None,
+        record_tps: bool = True,
     ) -> str:
+        """One chat completion. ``record_tps`` feeds the per-call 思考予算
+        measurement; deliberate() turns it OFF on the fan-out calls and records a
+        single aggregate sample instead (so batching is not double-counted)."""
+        content, _tokens, _elapsed = self._chat_timed(
+            messages, schema=schema, max_tokens=max_tokens, record_tps=record_tps
+        )
+        return content
+
+    def _chat_timed(
+        self,
+        messages: list[dict[str, str]],
+        schema: dict[str, Any] | None = None,
+        max_tokens: int | None = None,
+        record_tps: bool = True,
+    ) -> tuple[str, int, float]:
+        """Like ``_chat`` but also returns (completion_tokens, wall_seconds) so the
+        八識熟考 fan-out can sum the tokens and time the whole batch itself."""
         if not self.cassette.base_url:
             raise RuntimeError("Cassette has no base_url.")
         # Respect a 思考予算 max_tokens when one is explicitly passed (so 雲水's
@@ -607,8 +869,9 @@ class OpenAICompatibleBrain:
         elapsed = time.monotonic() - started
         if completion_tokens <= 0:
             completion_tokens = max(1, len(content) // 3)  # rough fallback
-        self._record_tps(completion_tokens, elapsed)
-        return content
+        if record_tps:
+            self._record_tps(completion_tokens, elapsed)
+        return content, completion_tokens, elapsed
 
     def _post_chat(self, payload: dict[str, Any]) -> tuple[str, int]:
         url = self.cassette.base_url.rstrip("/") + "/chat/completions"

@@ -45,6 +45,11 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="ぼうけんのしょ: 前世の教訓を次の生に届ける（cross-life lessons）",
     )
+    pixel.add_argument(
+        "--deliberate",
+        action="store_true",
+        help="八識熟考: [熟考]トグルを最初からONにして観戦する（cassette の parallel>0 が必要）",
+    )
     pixel.add_argument("--scale", type=int, default=0, choices=(0, 1, 2, 3),
                        help="window preset: 0=auto (Full HD if desktop allows, else 90%% of desktop), "
                             "1=small 1280x720, 2=fhd 1920x1080, 3=large 2560x1440")
@@ -116,6 +121,12 @@ def _add_common(parser: argparse.ArgumentParser) -> None:
         "--book",
         action="store_true",
         help="ぼうけんのしょ: 前世の教訓を次の生に届ける（cross-life lessons）",
+    )
+    parser.add_argument(
+        "--deliberate",
+        action="store_true",
+        help="八識熟考: 一つの観測を八つの識で並列に読み一手に統合する"
+        "（cassette の parallel>0 が必要）",
     )
 
 

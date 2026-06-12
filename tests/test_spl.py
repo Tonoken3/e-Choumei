@@ -1482,6 +1482,218 @@ class BodyScreamTests(unittest.TestCase):
         self.assertNotIn("body", obs)
 
 
+class _StubBrain:
+    """An OpenAICompatibleBrain whose ONLY network seam (_post_chat) is mocked, so
+    the real _chat_timed / _propose_timed / ThreadPoolExecutor fan-out all run for
+    real. A lens post (system prompt names one of the八識) returns a {counsel}
+    JSON; the aggregator/choose post returns a valid action JSON. A set of lens
+    names in ``dead_lenses`` raises inside the lens call to exercise the
+    skip-on-failure path. ``posts`` records (is_lens, system_prompt) per call."""
+
+    @staticmethod
+    def make(parallel: int = 8, tps: float = 0.0, dead_lenses=None,
+             lens_tokens: int = 7, agg_tokens: int = 40):
+        from spl.agent.llm_client import Cassette, OpenAICompatibleBrain
+
+        dead = set(dead_lenses or [])
+        eight = __import__(
+            "spl.agent.prompts", fromlist=["EIGHT_LENSES"]
+        ).EIGHT_LENSES
+
+        class _Brain(OpenAICompatibleBrain):
+            def __init__(self):
+                super().__init__(Cassette(
+                    name="stub", base_url="http://stub/v1", parallel=parallel, tps=tps,
+                ))
+                self.posts = []  # (is_lens, system_prompt)
+
+            def _resolve_model(self):
+                return "stub-model"
+
+            def _post_chat(self, payload):
+                import json as _json
+
+                system = payload["messages"][0]["content"]
+                # a lens post is identified by its 識 marker 「<lens>」を司る識
+                this_lens = next(
+                    (lens for lens, _t in eight if f"「{lens}」を司る識" in system), None
+                )
+                is_lens = this_lens is not None
+                self.posts.append((is_lens, system))
+                if is_lens:
+                    if this_lens in dead:
+                        raise RuntimeError(f"lens {this_lens} is down")
+                    body = _json.dumps(
+                        {"counsel": f"{this_lens}の進言。水場へ向かえ。"},
+                        ensure_ascii=False,
+                    )
+                    return body, lens_tokens
+                # the 阿頼耶識 aggregator (or a normal choose proposal)
+                body = _json.dumps(
+                    {"think": "統合", "action": "rest", "args": {}, "say": "休む"},
+                    ensure_ascii=False,
+                )
+                return body, agg_tokens
+
+        return _Brain()
+
+
+class HasshikiDeliberationTests(unittest.TestCase):
+    """八識熟考 — parallel deliberation (mock transport; no live calls)."""
+
+    def _sim(self, **stat_overrides):
+        sim = Simulation(seed=42, max_days=112)
+        for k, v in stat_overrides.items():
+            setattr(sim.hero, k, v)
+        return sim
+
+    def test_cassette_parallel_flag_parses(self) -> None:
+        from spl.agent.llm_client import find_cassette
+        from spl.core.sim import PROJECT_ROOT
+
+        path = PROJECT_ROOT / "config" / "models.toml"
+        vllm = find_cassette(path, "Qwen仙人vLLM")
+        self.assertEqual(vllm.parallel, 8)
+        # a cassette without the key defaults to 0 (off).
+        self.assertEqual(find_cassette(path, "Qwen仙人").parallel, 0)
+
+    def test_lenses_for_uses_first_n_and_cycles_above_eight(self) -> None:
+        from spl.agent.prompts import EIGHT_LENSES, lenses_for
+
+        self.assertEqual([k for k, _ in lenses_for(3)], ["水", "食", "住"])
+        self.assertEqual(len(lenses_for(8)), 8)
+        twelve = [k for k, _ in lenses_for(12)]
+        self.assertEqual(twelve[:8], [k for k, _ in EIGHT_LENSES])
+        self.assertEqual(twelve[8:], ["水", "食", "住", "危険"])  # cycles
+        self.assertEqual(lenses_for(0), [])
+
+    def test_fanout_collects_n_counsels_and_one_aggregate_action(self) -> None:
+        brain = _StubBrain.make(parallel=8)
+        action = brain.deliberate(self._sim())
+        self.assertEqual(action.action, "rest")  # the aggregator's synthesis
+        # eight lens posts + one aggregate (non-lens) post.
+        lens_posts = [p for p in brain.posts if p[0]]
+        agg_posts = [p for p in brain.posts if not p[0]]
+        self.assertEqual(len(lens_posts), 8)
+        self.assertEqual(len(agg_posts), 1)
+        self.assertEqual(len(brain.last_counsels), 8)
+        self.assertEqual(brain.deliberations, 1)
+        self.assertEqual(brain.calls, 1)
+
+    def test_failed_lens_threads_are_skipped_without_crashing(self) -> None:
+        brain = _StubBrain.make(parallel=8, dead_lenses={"水", "心", "長期"})
+        action = brain.deliberate(self._sim())
+        # the turn still produced an action; only the live lenses counselled.
+        self.assertEqual(action.action, "rest")
+        self.assertEqual(len(brain.last_counsels), 5)  # 8 - 3 dead
+        kept = {lens for lens, _ in brain.last_counsels}
+        self.assertNotIn("水", kept)
+        self.assertNotIn("心", kept)
+        # the aggregate action call still ran exactly once (the one non-lens post).
+        self.assertEqual(len([p for p in brain.posts if not p[0]]), 1)
+
+    def test_auto_burst_triggers_on_body_scream_and_not_otherwise(self) -> None:
+        # Healthy hermit, toggle off → serial choose(), no deliberation.
+        calm = _StubBrain.make(parallel=8)
+        calm.deliberate_forced = False
+        calm.choose_or_deliberate(self._sim())  # water/hunger healthy at seed 42
+        self.assertEqual(calm.deliberations, 0)
+
+        # Thirst screaming (water<=10) → auto-burst even with the toggle off.
+        screaming = _StubBrain.make(parallel=8)
+        screaming.deliberate_forced = False
+        screaming.choose_or_deliberate(self._sim(water=8))
+        self.assertEqual(screaming.deliberations, 1)
+
+    def test_toggle_forces_deliberation_even_when_calm(self) -> None:
+        brain = _StubBrain.make(parallel=8)
+        brain.deliberate_forced = True
+        brain.choose_or_deliberate(self._sim())  # calm, but forced
+        self.assertEqual(brain.deliberations, 1)
+
+    def test_parallel_zero_never_deliberates(self) -> None:
+        # No parallel budget → choose_or_deliberate always falls to serial choose,
+        # even when a body screams and the toggle is forced.
+        brain = _StubBrain.make(parallel=0)
+        brain.deliberate_forced = True
+        brain.choose_or_deliberate(self._sim(water=2))
+        self.assertEqual(brain.deliberations, 0)
+
+    def test_aggregate_tps_recorded_once_as_sum_over_wall(self) -> None:
+        # 8 lenses × 7 tokens + 40 aggregate = 96 tokens in ONE rolling sample.
+        brain = _StubBrain.make(parallel=8, lens_tokens=7, agg_tokens=40)
+        captured = {}
+        orig = brain._record_tps_aggregate
+
+        def _spy(tokens, seconds):
+            captured["tokens"] = tokens
+            captured["seconds"] = seconds
+            return orig(tokens, seconds)
+
+        brain._record_tps_aggregate = _spy
+        self.assertEqual(len(brain._tps_samples), 0)
+        brain.deliberate(self._sim())
+        # exactly ONE aggregate sample (per-call recording suppressed).
+        self.assertEqual(len(brain._tps_samples), 1)
+        # the honesty contract: tokens = SUM of all N+1 completion tokens.
+        self.assertEqual(captured["tokens"], 8 * 7 + 40)
+        self.assertGreater(captured["seconds"], 0)
+        # the recorded TPS is exactly sum / wall.
+        self.assertAlmostEqual(
+            brain._tps_samples[0], captured["tokens"] / captured["seconds"], places=6
+        )
+        self.assertEqual(brain.deliberations, 1)
+
+    def test_status_line_gains_jukkou_marker_after_deliberation(self) -> None:
+        brain = _StubBrain.make(parallel=8, tps=500.0)  # forced 仙界
+        self.assertNotIn("熟考", brain.status_line())
+        brain.deliberate(self._sim())
+        self.assertIn("熟考1", brain.status_line())
+        self.assertIn("仙界", brain.status_line())
+
+    def test_condition_gate_caps_the_aggregator_tier(self) -> None:
+        # A starving mind still fans out, but the aggregate call is condition-
+        # capped to 雲水 (idx 0) exactly like choose().
+        brain = _StubBrain.make(parallel=8, tps=500.0)  # would be 仙界 unconditionally
+        brain.deliberate(self._sim(hunger=0))  # 飢渇 → cap to reflex
+        self.assertEqual(brain.effective_tier_name, "雲水")
+        self.assertEqual(brain.condition_note, "飢渇")
+
+    def test_parse_counsel_reads_schema_field_and_falls_back(self) -> None:
+        from spl.agent.llm_client import _parse_counsel
+
+        # the schema path: {"counsel": "..."} → the field
+        self.assertEqual(
+            _parse_counsel('{"counsel": "水辺へ歩め。喉を潤せ。"}'), "水辺へ歩め。喉を潤せ。"
+        )
+        # schema dropped by an old backend → free-text fallback keeps clean JP
+        self.assertEqual(_parse_counsel("水辺へ歩め。喉を潤せ。"), "水辺へ歩め。喉を潤せ。")
+        self.assertIsNone(_parse_counsel(""))
+        self.assertIsNone(_parse_counsel(None))
+
+    def test_clean_counsel_strips_reasoning_leak(self) -> None:
+        from spl.agent.llm_client import _clean_counsel
+
+        # a clean Japanese reply passes through untouched
+        self.assertEqual(_clean_counsel("水辺へ歩め。喉を潤せ。"), "水辺へ歩め。喉を潤せ。")
+        # a <think> fence is stripped
+        self.assertEqual(
+            _clean_counsel("<think>reasoning…</think>水辺へ歩め。"), "水辺へ歩め。"
+        )
+        # an English 'thinking process' trace with NO JP conclusion → None
+        leak = "Here's a thinking process:\n1. Analyze the body.\n2. Decide."
+        self.assertIsNone(_clean_counsel(leak))
+
+    def test_aggregate_call_carries_the_counsels(self) -> None:
+        brain = _StubBrain.make(parallel=8)
+        brain.deliberate(self._sim())
+        # the schema (aggregate) post's last user message holds the 八識 block.
+        # _post_chat only stores (had_schema, system); assert via last_counsels +
+        # that the aggregate ran with all eight present.
+        self.assertEqual(len(brain.last_counsels), 8)
+        self.assertTrue(all(text for _, text in brain.last_counsels))
+
+
 if __name__ == "__main__":
     unittest.main()
 

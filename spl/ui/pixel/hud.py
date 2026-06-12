@@ -452,8 +452,8 @@ class Overlays:
             "    C/D/T: " + f.jp("作る/日記/作戦", "craft/diary/strategy"),
             "1〜5: " + f.jp("速度(承認/遅/普/速/最速)", "speed (approve/slow/nrm/fast/max)") +
             "    M: " + f.jp("観戦⇔手動", "watch<->manual") + "    H: " + f.jp("ヘルプ", "help"),
-            f.jp("ホイール/＋－: 寄る・引く   F: 仙人を追従   右ドラッグ: 視点移動",
-                 "Wheel/+-: zoom   F: follow the hermit   right-drag: pan"),
+            f.jp("ホイール/＋－: 寄る・引く   F: 仙人を追従   G: 八識熟考   右ドラッグ: 視点移動",
+                 "Wheel/+-: zoom   F: follow   G: 八識 deliberate   right-drag: pan"),
         ]
         lh = f.body.get_height() + lay.px(3)
         y = rect.y + f.big.get_height() + lay.px(10)

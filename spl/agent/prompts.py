@@ -21,6 +21,61 @@ How the world works (the sim enforces all of this; read "recent" to see why your
 - bouken_no_sho holds lessons written by your PAST SELVES after dying on this island. They paid for them with their lives; weigh them like scripture.
 """
 
+# ===========================================================================
+# 八識熟考 (parallel deliberation): a body is serial — one hand, one step at a
+# time — but a silicon mind is PARALLEL. N concurrent inference streams read the
+# SAME observation through fixed themed lenses (八識), each counsels in two short
+# Japanese sentences, and 阿頼耶識 (the storehouse-consciousness aggregator)
+# synthesizes them into one action under the normal JSON contract.
+# ===========================================================================
+#
+# The eight lenses, in survival priority. Each entry is (key, theme-phrase): the
+# phrase is dropped straight into the lens prompt so the識 reads the observation
+# through that one subject only. With N<8 the first N are used; N>8 cycles.
+EIGHT_LENSES: tuple[tuple[str, str], ...] = (
+    ("水", "渇きと水場"),
+    ("食", "今日の糧と兵站"),
+    ("住", "火・壁・道具"),
+    ("危険", "死因の予兆"),
+    ("資源", "在庫と採取"),
+    ("季節", "季節と天候の先読み"),
+    ("心", "正気と休息"),
+    ("長期", "冬への線路"),
+)
+
+
+def lenses_for(n: int) -> list[tuple[str, str]]:
+    """The lenses to run for ``n`` streams: the first n when n≤8, cycling the
+    fixed eight when n>8 (so a 12-wide rig revisits 水/食/住/危険 a second time)."""
+    if n <= 0:
+        return []
+    eight = list(EIGHT_LENSES)
+    return [eight[i % len(eight)] for i in range(n)]
+
+
+def lens_prompt(lens: str, theme: str) -> str:
+    """The system prompt for one 識: read the observation through this lens only
+    and counsel the next move in two short Japanese sentences (~120 tokens).
+
+    The instruction is blunt about emitting the answer FIRST with no preamble: a
+    reasoning model that spends its whole budget on a 'thinking process' before
+    the conclusion would be truncated to a useless trace, so we forbid it and the
+    aggregator (and _clean_counsel) defend against any that leaks through."""
+    return (
+        f"あなたは八識のうち「{lens}」を司る識。観測を「{theme}」の主題だけで読み、"
+        "他の論点は他の識に任せよ。"
+        "思考過程・前置き・英語・箇条書き・JSONは一切書くな。"
+        "いきなり、次の一手への進言を日本語の二文だけで返せ。"
+        "行動名を一つ含めてよい。"
+    )
+
+
+# 阿頼耶識: the storehouse that holds the eight and synthesizes one act from them.
+AGGREGATE_PROMPT = """あなたは阿頼耶識——八識の進言を蔵に納め、一手に統合する識。
+同じ観測と、八識それぞれの進言が与えられる。進言は競合しうる。生存を最優先に、
+体の声があればそれに従い、八識の進言を統合して最善の一手を選び、通常のJSON契約で返せ。
+"""
+
 REPAIR_PROMPT = """Your previous answer was not valid action JSON.
 Return exactly:
 {"think":"...","action":"eat","args":{"item":"berries"},"say":"..."}

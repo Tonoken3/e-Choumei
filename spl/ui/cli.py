@@ -203,7 +203,11 @@ def run_simulate(args: object) -> int:
 def choose_action(sim: Simulation, brain: object | None, local_agent: LocalPolicyAgent, llm_enabled: bool) -> GameAction:
     if llm_enabled and brain is not None:
         try:
-            return brain.choose(sim)
+            # 八識熟考: fan out the eight識 when --deliberate forced it OR the body
+            # is screaming (auto-burst); else the serial choose. Brains without the
+            # method (older fakes) fall back to choose().
+            chooser = getattr(brain, "choose_or_deliberate", None) or brain.choose
+            return chooser(sim)
         except Exception as exc:
             sim.log(f"LLM unavailable, local policy takes over this turn: {exc}")
     return local_agent.choose(sim)
@@ -226,7 +230,12 @@ def _make_brain(args: object) -> object | None:
     if not cassette.base_url:
         return None
     cassette = _apply_tps_override(cassette, args)
-    return OpenAICompatibleBrain(cassette)
+    brain = OpenAICompatibleBrain(cassette)
+    # 八識熟考: --deliberate forces the fan-out every turn when the cassette has a
+    # parallel budget (a body scream auto-bursts regardless of this flag).
+    if getattr(args, "deliberate", False) and brain.parallel > 0:
+        brain.deliberate_forced = True
+    return brain
 
 
 def _apply_tps_override(cassette: object, args: object) -> object:

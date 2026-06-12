@@ -180,6 +180,11 @@ class PixelApp:
         # modes / state
         self.manual = bool(getattr(args, "manual", False))
         self.speed = int(getattr(args, "speed", 2) or 2)
+        # 八識熟考 (parallel deliberation) watch toggle: while ON, the LLM worker
+        # fans out the eight識 instead of the serial choose(). Mirrored onto the
+        # brain's deliberate_forced. Off by default; a body scream auto-bursts
+        # regardless. Inert when the cassette has no parallel budget.
+        self.deliberate_mode = bool(getattr(args, "deliberate", False))
         self.paused = False
         self.overlay: str | None = None  # diary | help | craft | heaven | eat
         self.diary_scroll = 0
@@ -228,6 +233,11 @@ class PixelApp:
             self.sim.set_diarist(self.brain)
         else:
             self.llm_enabled = False
+        # 八識熟考: a cassette with no parallel budget can't deliberate; force the
+        # toggle off so the button reads inert. Mirror the toggle onto the brain.
+        if self.brain is None or getattr(self.brain, "parallel", 0) <= 0:
+            self.deliberate_mode = False
+        self._sync_deliberate()
         self._motto: dict | None = None
         self._motto_busy = False
         self._pending_action: GameAction | None = None
@@ -485,6 +495,23 @@ class PixelApp:
             cassette = replace(cassette, tps=tps)
         return OpenAICompatibleBrain(cassette)
 
+    # -- 八識熟考 toggle ------------------------------------------------------
+    def _can_deliberate(self) -> bool:
+        """True when an LLM brain with a parallel budget is wired (the [熟考]
+        button is live only then)."""
+        return self.brain is not None and getattr(self.brain, "parallel", 0) > 0
+
+    def _sync_deliberate(self) -> None:
+        """Mirror the UI toggle onto the brain's deliberate_forced flag."""
+        if self.brain is not None:
+            self.brain.deliberate_forced = bool(self.deliberate_mode) and self._can_deliberate()
+
+    def _toggle_deliberate(self) -> None:
+        if not self._can_deliberate():
+            return
+        self.deliberate_mode = not self.deliberate_mode
+        self._sync_deliberate()
+
     # -- ぼうけんのしょ -------------------------------------------------------
     def _book_cassette_name(self) -> str:
         if self.brain is not None:
@@ -573,6 +600,8 @@ class PixelApp:
             ("zoom_out", "－", f.jp("引く（ホイール下）", "zoom out (wheel)")),
             ("zoom_in", "＋", f.jp("寄る（ホイール上）", "zoom in (wheel)")),
             ("follow", f.jp("追従", "Follow"), f.jp("仙人を追って中央に映す", "keep the hermit centred")),
+            ("deliberate", f.jp("熟考", "Deliberate"),
+             f.jp("八識熟考：八つの識で同時に考える（キー G）", "八識: think with eight parallel minds (G)")),
         ]
         x = lay.map_rect.x + lay.px(6)
         y = lay.hud_top + lay.px(3)
@@ -607,6 +636,12 @@ class PixelApp:
                 b.label = f.jp("追従●", "Follow●") if self.follow else f.jp("追従", "Follow")
                 b.active = self.follow
                 b.enabled = not at_min  # inert at the whole-island floor
+            elif b.key == "deliberate":
+                # 八識熟考: ● marks the toggle ON. Inert without a parallel brain.
+                on = bool(self.deliberate_mode)
+                b.label = f.jp("熟考●", "Delib●") if on else f.jp("熟考", "Delib")
+                b.active = on
+                b.enabled = self._can_deliberate()
             if b.key in {"craft", "eat"}:
                 b.enabled = self.manual
             if b.key == "zoom_in":
@@ -878,6 +913,8 @@ class PixelApp:
             self._zoom_at(-1, None)
         elif key == "follow":
             self._toggle_follow()
+        elif key == "deliberate":
+            self._toggle_deliberate()
 
     def _click_overlay(self, wx: int, wy: int) -> None:
         from spl.core.actions import GameAction as _GA
@@ -966,7 +1003,9 @@ class PixelApp:
     # -- watch-mode stepping -------------------------------------------------
     def _llm_worker(self) -> None:
         try:
-            action = self.brain.choose(self.sim)
+            # 八識熟考: choose_or_deliberate fans out the eight識 when the toggle
+            # is on OR the flesh is screaming (auto-burst); else the serial choose.
+            action = self.brain.choose_or_deliberate(self.sim)
         except Exception as exc:  # noqa: BLE001 - mirror cli.choose_action fallback
             self.sim.log(f"LLM unavailable, local policy takes over this turn: {exc}")
             action = self.local_agent.choose(self.sim)
@@ -1202,6 +1241,9 @@ class PixelApp:
             return
         if key == pg.K_f:
             self._toggle_follow()
+            return
+        if key == pg.K_g:
+            self._toggle_deliberate()  # 八識熟考 watch toggle
             return
         if key in (pg.K_1, pg.K_2, pg.K_3, pg.K_4, pg.K_5):
             self._set_speed({pg.K_1: 1, pg.K_2: 2, pg.K_3: 3, pg.K_4: 4, pg.K_5: 5}[key])
