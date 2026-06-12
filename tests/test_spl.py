@@ -988,7 +988,12 @@ class KakunTests(unittest.TestCase):
             book.append({"seed": 0, "days": 40, "ending": "生存", "lessons": ["火", "実"]})
             table = book.history_table()
             self.assertEqual(len(table), 2)
-            self.assertEqual(table[0], {"life": 1, "days": 3, "ending": "渇き", "lessons": ["水"]})
+            # 神のレバー: history_table now carries the共同 marker miracles_used
+            # (0 for an unassisted life) so the 編纂者 can discount assisted lives.
+            self.assertEqual(
+                table[0],
+                {"life": 1, "days": 3, "ending": "渇き", "lessons": ["水"], "miracles_used": 0},
+            )
             self.assertEqual(table[1]["days"], 40)
             self.assertEqual(table[1]["lessons"], ["火", "実"])
 
@@ -2920,6 +2925,318 @@ class DifficultyTests(unittest.TestCase):
         for bad in ("激辛", "ふつう", "やさしい"):
             with self.assertRaises(SystemExit):
                 parser.parse_args(["simulate", "--difficulty", bad])
+
+
+def _advance_one_night(sim: Simulation, keep_alive: bool = True) -> None:
+    """Cross exactly one day/night boundary deterministically: empty the AP and
+    call end_day() once. Resolves any queued miracle at the boundary without
+    relying on the local agent's choices, so the night-rule tests are exact.
+
+    ``keep_alive`` tops up the hermit's vitals BEFORE the night so neglect alone
+    never ends the run during a multi-night march (the death-night test passes
+    keep_alive=False to let starvation/dehydration kill on purpose)."""
+    if keep_alive:
+        sim.hero.hp = 100
+        sim.hero.hunger = 90
+        sim.hero.water = 90
+        sim.hero.sanity = 90
+    sim.hero.ap_left = 0
+    sim.end_day()
+
+
+class DivineLeverTests(unittest.TestCase):
+    """神のレバー (共度モード奇跡) — the full mock list from the plan. No network."""
+
+    # -- 神力経済 (A-hybrid: 開始3・7日目朝+1・上限5・不足時拒否) -----------------
+    def test_starting_power_is_three(self) -> None:
+        sim = Simulation(seed=42, max_days=30)
+        self.assertEqual(sim.divine.power, 3)
+        self.assertEqual(sim.divine.miracles_used, 0)
+
+    def test_power_grants_plus_one_every_seventh_morning(self) -> None:
+        sim = Simulation(seed=42, max_days=30)
+        # Spend nothing; walk to the morning of day 7 -> +1 (3 -> 4).
+        while sim.world.day < 7 and not sim.done:
+            _advance_one_night(sim)
+        self.assertEqual(sim.world.day, 7)
+        self.assertEqual(sim.divine.power, 4)
+        # walk to day 14 -> +1 again (4 -> 5).
+        while sim.world.day < 14 and not sim.done:
+            _advance_one_night(sim)
+        self.assertEqual(sim.divine.power, 5)
+
+    def test_power_is_capped_at_five(self) -> None:
+        sim = Simulation(seed=42, max_days=40)
+        # by day 21 the un-spent power would be 6 without a cap; it must stay 5.
+        while sim.world.day < 21 and not sim.done:
+            _advance_one_night(sim)
+        self.assertEqual(sim.divine.power, 5)
+
+    def test_queue_rejected_when_power_insufficient(self) -> None:
+        sim = Simulation(seed=42, max_days=10)
+        sim.divine.power = 0
+        ok, reason = sim.queue_miracle("weather", {"weather": "rain"})
+        self.assertFalse(ok)
+        self.assertIn("神力", reason)
+        # nothing consumed, nothing logged, no pending effect
+        self.assertEqual(sim.divine.power, 0)
+        self.assertIsNone(sim.divine.forced_weather)
+        self.assertEqual(sim.divine.miracles_used, 0)
+
+    def test_score_never_counts_divine_power(self) -> None:
+        a = Simulation(seed=42, max_days=10)
+        before = a.score()
+        a.divine.power = 5
+        a.divine.miracles_used = 3
+        self.assertEqual(a.score(), before)
+
+    # -- 夜ルール (神は夜に働く) ------------------------------------------------
+    def test_forced_weather_applies_next_morning(self) -> None:
+        sim = Simulation(seed=1, max_days=10)
+        # spring palette includes rain; force it for tomorrow.
+        ok, _ = sim.queue_miracle("weather", {"weather": "rain"})
+        self.assertTrue(ok)
+        # nothing changes tonight — the EFFECT is at the boundary
+        _advance_one_night(sim)
+        self.assertEqual(sim.world.weather, "rain")
+        self.assertIsNone(sim.divine.forced_weather)  # consumed
+
+    def test_forced_weather_does_not_perturb_world_rng_stream(self) -> None:
+        # The seed-comparison guard (plan §4): a forced weather still DRAWS
+        # next_weather and DISCARDS it, and is fed the NATURAL weather shadow as
+        # ``current`` — so the world RNG stream stays bit-identical to an un-helped
+        # run. We ISOLATE the weather draw by walling the hermit off from every
+        # weather-dependent RNG roll (house_upgrade => no storm-damage/winter roll;
+        # fence => no dog raid) and forcing a CALM day so no new event fires; the
+        # natural-weather shadow AND the live RNG state must then match exactly.
+        def _walled(seed: int) -> Simulation:
+            sim = Simulation(seed=seed, max_days=20)
+            sim.hero.add_item("house_upgrade")
+            sim.hero.add_item("fence")
+            return sim
+
+        plain = _walled(7)
+        helped = _walled(7)
+        helped.queue_miracle("weather", {"weather": "sunny"})  # calm forced day
+        for _ in range(10):
+            _advance_one_night(plain)
+            _advance_one_night(helped)
+            self.assertEqual(plain.last_natural_weather, helped.last_natural_weather,
+                             f"natural-weather RNG diverged at day {plain.world.day}")
+        self.assertEqual(plain.rng._rng.getstate(), helped.rng._rng.getstate(),
+                         "world RNG state diverged after a forced weather")
+
+    def test_manna_lands_in_the_morning_stores(self) -> None:
+        sim = Simulation(seed=3, max_days=10)
+        before = sim.hero.item_count("fish")
+        ok, _ = sim.queue_miracle("manna", {"item": "fish"})
+        self.assertTrue(ok)
+        self.assertEqual(sim.hero.item_count("fish"), before)  # not yet
+        _advance_one_night(sim)
+        self.assertEqual(sim.hero.item_count("fish"), before + 3)
+        self.assertEqual(sim.divine.pending_manna, {})  # consumed
+
+    def test_manna_is_void_on_a_death_night_no_resurrection(self) -> None:
+        # 神は夜に働く but does NOT resurrect: a hermit who dies tonight gets no
+        # manna tomorrow (there is no tomorrow).
+        sim = Simulation(seed=5, max_days=10)
+        sim.queue_miracle("manna", {"item": "berries"})
+        sim.hero.hp = 1
+        sim.hero.hunger = 0
+        sim.hero.water = 0
+        before = sim.hero.item_count("berries")
+        _advance_one_night(sim, keep_alive=False)  # starvation+dehydration kills
+        self.assertFalse(sim.hero.alive)
+        self.assertTrue(sim.failed)
+        self.assertEqual(sim.hero.item_count("berries"), before)  # voided
+
+    def test_dream_is_etched_into_tonights_memory(self) -> None:
+        sim = Simulation(seed=9, max_days=10)
+        ok, _ = sim.queue_miracle("dream", {"text": "西の岩場に水脈あり"})
+        self.assertTrue(ok)
+        day = sim.world.day
+        _advance_one_night(sim)
+        notes = sim.memory.notes.get(day, [])
+        self.assertTrue(any("西の岩場に水脈あり" in n for n in notes),
+                        f"dream not in tonight's notes: {notes}")
+        # and it echoes through the recent window (memory diary)
+        self.assertIn("西の岩場に水脈あり", sim.memory.recent_context(days=7))
+
+    def test_summoned_merchant_arrives_next_morning_on_dedicated_rng(self) -> None:
+        sim = Simulation(seed=11, max_days=10)
+        self.assertIsNone(sim.current_offer)
+        ok, _ = sim.queue_miracle("merchant", {})
+        self.assertTrue(ok)
+        _advance_one_night(sim)
+        self.assertIsNotNone(sim.current_offer)
+        self.assertFalse(sim.divine.pending_merchant)
+        self.assertEqual(sim.divine.last_merchant_day, sim.world.day)
+
+    def test_summoned_merchant_does_not_touch_world_rng(self) -> None:
+        # The merchant lottery runs on GameRng(seed ^ SALT); a plain run's world
+        # RNG stream must be untouched by the summon (weather sequence identical).
+        plain = Simulation(seed=13, max_days=12)
+        helped = Simulation(seed=13, max_days=12)
+        helped.queue_miracle("merchant", {})
+        for _ in range(6):
+            _advance_one_night(plain)
+            _advance_one_night(helped)
+            self.assertEqual(plain.world.weather, helped.world.weather)
+
+    # -- 制約 (constraints) ----------------------------------------------------
+    def test_weather_cannot_be_forced_two_days_running(self) -> None:
+        sim = Simulation(seed=1, max_days=10)
+        ok, _ = sim.queue_miracle("weather", {"weather": "rain"})
+        self.assertTrue(ok)
+        # same day: a second weather cannot be queued (連日不可 keyed on the day).
+        ok2, reason = sim.queue_miracle("weather", {"weather": "sunny"})
+        self.assertFalse(ok2)
+        self.assertIn("連日", reason)
+
+    def test_weather_must_stay_in_season_palette(self) -> None:
+        sim = Simulation(seed=1, max_days=10)  # day 1 = spring (no snow/drought)
+        ok, reason = sim.queue_miracle("weather", {"weather": "snow"})
+        self.assertFalse(ok)
+        self.assertIn("季節", reason)
+
+    def test_merchant_three_day_cooldown(self) -> None:
+        sim = Simulation(seed=11, max_days=12)
+        sim.queue_miracle("merchant", {})
+        _advance_one_night(sim)  # merchant arrives day 2; last_merchant_day=2
+        sim.current_offer = None  # clear so a new summon could land
+        sim.divine.power = 5  # plenty of power, so the CD (not power) is tested
+        # within 3 days of the last merchant, a summon is refused.
+        ok, reason = sim.queue_miracle("merchant", {})
+        self.assertFalse(ok)
+        self.assertIn("商人", reason)
+
+    def test_oracle_only_once_per_day(self) -> None:
+        sim = Simulation(seed=2, max_days=10)
+        # The 1日1回 constraint is checked BEFORE the 神力 balance, so it surfaces
+        # even after the first oracle has spent the power (cost 3 from a start 3).
+        ok, _ = sim.queue_miracle("oracle", {"text": "水を飲め"})
+        self.assertTrue(ok)
+        ok2, reason = sim.queue_miracle("oracle", {"text": "魚を獲れ"})
+        self.assertFalse(ok2)
+        self.assertIn("一日に一度", reason)
+
+    def test_manna_rejects_items_off_the_whitelist(self) -> None:
+        sim = Simulation(seed=2, max_days=10)
+        for bad in ("wood", "stone", "iron_ore", "bread", "stew"):
+            ok, reason = sim.queue_miracle("manna", {"item": bad})
+            self.assertFalse(ok, f"{bad} should be off the manna whitelist")
+            self.assertEqual(sim.divine.power, 3)  # nothing consumed
+
+    # -- divine_command (神託 = 勅命) ------------------------------------------
+    def test_divine_command_appears_below_body_above_strategy_and_consumes_once(self) -> None:
+        from spl.agent.observer import ObservationBuilder
+
+        sim = Simulation(seed=4, max_days=10)
+        sim.set_strategy("井戸を最優先")
+        sim.queue_miracle("oracle", {"text": "今すぐ水辺へ走れ"})
+        sim.end_day()  # 神は夜に働く: the 勅命 is promoted at the night boundary
+        # make the body scream so we can prove the ORDER of the keys
+        sim.hero.water = 5
+        obs = ObservationBuilder().build(sim)
+        self.assertEqual(obs["divine_command"], "今すぐ水辺へ走れ")
+        keys = list(obs.keys())
+        # body (the flesh) outranks the 勅命; the 勅命 outranks the standing order
+        self.assertLess(keys.index("body"), keys.index("divine_command"))
+        self.assertLess(keys.index("divine_command"), keys.index("strategy_from_heaven"))
+        # consumed on the first build — a second build no longer carries it
+        obs2 = ObservationBuilder().build(sim)
+        self.assertNotIn("divine_command", obs2)
+
+    def test_divine_command_rides_the_stub_brains_system_and_observation(self) -> None:
+        # The 勅命 must reach a real brain: it lands in the user-message obs JSON,
+        # and the system prompt explains it. Uses the network-mocked _StubBrain.
+        brain = _StubBrain.make(parallel=0)
+        sim = Simulation(seed=4, max_days=10)
+        sim.queue_miracle("oracle", {"text": "今すぐ水を飲め"})
+        brain.choose(sim)
+        # the LAST proposal/choose post carries the system prompt + the obs.
+        # _StubBrain records (is_lens, system) per post; the system prompt must
+        # name divine_command, and the obs JSON (built in choose) carried it.
+        self.assertTrue(any("divine_command" in system for _is_lens, system in brain.posts))
+        # the 勅命 was consumed exactly once by the brain's single build
+        self.assertIsNone(sim.divine.divine_command)
+
+    def test_system_prompt_explains_divine_command(self) -> None:
+        from spl.agent.prompts import SYSTEM_PROMPT
+
+        self.assertIn("divine_command", SYSTEM_PROMPT)
+        self.assertIn("勅命", SYSTEM_PROMPT)
+
+    # -- 共同 marking ----------------------------------------------------------
+    def test_miracles_used_marks_the_bouken_entry_as_coop(self) -> None:
+        from spl.agent.bouken import build_entry
+
+        sim = Simulation(seed=6, max_days=10)
+        sim.queue_miracle("dream", {"text": "備えよ"})
+        sim.queue_miracle("manna", {"item": "fish"})
+        entry = build_entry(sim, seed=6, motto={"motto": "x", "lessons": ["l"]})
+        self.assertEqual(entry["miracles_used"], 2)
+        # an unassisted life records 0
+        clean = Simulation(seed=6, max_days=10)
+        self.assertEqual(build_entry(clean, 6, {})["miracles_used"], 0)
+
+    def test_compile_discounts_assisted_lives(self) -> None:
+        import tempfile
+
+        from spl.agent.bouken import BoukenNoSho, fallback_compile
+
+        with tempfile.TemporaryDirectory() as tmp:
+            book = BoukenNoSho.load(f"{tmp}/bouken_coop.json")
+            # a LONG assisted life vs a SHORT unassisted life: the unassisted
+            # life's lesson must win despite the shorter lifespan (偽教訓汚染ガード).
+            book.append({"seed": 0, "days": 90, "lessons": ["奇跡で得た教え"],
+                         "miracles_used": 4})
+            book.append({"seed": 0, "days": 12, "lessons": ["己の足で得た教え"],
+                         "miracles_used": 0})
+            canon = fallback_compile(book)
+            self.assertEqual(canon[0], "己の足で得た教え",
+                             f"assisted life's lesson was not discounted: {canon}")
+            # history_table exposes the marker to the LLM 編纂者 too
+            self.assertEqual(book.history_table()[0]["miracles_used"], 4)
+
+    def test_result_screen_marks_coop(self) -> None:
+        import io
+        from contextlib import redirect_stdout
+
+        from spl.ui import cli
+
+        sim = Simulation(seed=8, max_days=10)
+        sim.queue_miracle("dream", {"text": "備えよ"})
+        sim.completed = True
+        sim.result_reason = "test"
+        buf = io.StringIO()
+        with redirect_stdout(buf):
+            cli.print_result(sim)
+        out = buf.getvalue()
+        self.assertIn("共同", out)
+        self.assertIn("夢のお告げ", out)
+
+    # -- 決定論 ----------------------------------------------------------------
+    def test_same_seed_and_miracle_log_reproduce_the_full_log(self) -> None:
+        def run() -> Simulation:
+            sim = Simulation(seed=21, max_days=12)
+            scripted = {2: ("dream", {"text": "備えよ"}),
+                        3: ("manna", {"item": "fish"}),
+                        4: ("weather", {"weather": "rain"})}
+            agent = LocalPolicyAgent()
+            for _ in range(12 * 60):
+                if sim.done:
+                    break
+                queued = scripted.pop(sim.world.day, None)
+                if queued is not None:
+                    sim.queue_miracle(*queued)
+                sim.step(agent.choose(sim))
+            return sim
+
+        a, b = run(), run()
+        self.assertEqual(a.full_log, b.full_log)
+        self.assertEqual(a.divine.miracle_log, b.divine.miracle_log)
+        self.assertEqual(a.score(), b.score())
 
 
 if __name__ == "__main__":

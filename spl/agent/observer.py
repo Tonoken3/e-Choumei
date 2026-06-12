@@ -41,6 +41,17 @@ class ObservationBuilder:
         # because procurement has lead time (誰だってわかること、を感覚器官に).
         if premonition:
             obs["premonition"] = premonition
+        # 🗲 神託(勅命) (神のレバー): a one-day command from the god, placed just
+        # BELOW the body screams and ABOVE the watcher's standing order — the
+        # flesh still outranks it (a dying body obeys thirst before any order),
+        # but it outranks the calm strategy. CONSUMED on the first build (one
+        # brain call), then cleared: 混乱時は聞き損なう — if the brain is confused
+        # this turn and never reaches a clean choose, the勅命 is simply spent and
+        # missed, which is the honest drama the design wants.
+        divine = getattr(sim, "divine", None)
+        if divine is not None and getattr(divine, "divine_command", None):
+            obs["divine_command"] = divine.divine_command
+            divine.divine_command = None
         obs.update({
             # The watcher's standing order (作戦). Placed at the TOP on purpose:
             # the watcher SEES THE TRUE WORLD STATE, so this outranks the hermit's

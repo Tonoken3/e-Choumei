@@ -13,6 +13,15 @@ from .crops import (
     monument_inscription,
 )
 from .crafting import RecipeBook
+from .divine import (
+    MANNA_FLAVOR,
+    MERCHANT_RNG_SALT,
+    MIRACLE_COSTS,
+    MIRACLE_LABELS,
+    DivineState,
+    power_after_grant,
+    validate_miracle,
+)
 from .events import EventBook, MerchantOffer
 from .hero import Hero
 from .rng import GameRng
@@ -141,6 +150,20 @@ class Simulation:
         self.day_log: list[str] = []
         self.full_log: list[str] = []
         self.current_offer: MerchantOffer | None = None
+        # 神のレバー (共同モード): the god's ledger — 神力, queued miracles, the
+        # constraint bookkeeping. A miracle changes the WORLD or the MIND, never
+        # the hermit's hand, and every effect resolves at the night boundary
+        # (神は夜に働く). score() never reads any of this. See spl/core/divine.py.
+        self.divine = DivineState()
+        # The NATURAL weather shadow: what the RNG actually rolled, regardless of
+        # any 天候の奇跡 override on world.weather. next_weather is fed THIS as
+        # ``current`` so a forced day never perturbs the persistence chain (the
+        # natural-weather sequence stays bit-identical to an un-helped run).
+        self.last_natural_weather = self.world.weather
+        # The DEDICATED merchant-lottery channel: GameRng(seed ^ MIRACLE_SALT).
+        # The 行商人召喚 offer is drawn here so the奇跡 never perturbs the world
+        # RNG stream (an un-helped run on the same seed stays bit-identical).
+        self.merchant_rng = GameRng(self.seed ^ MERCHANT_RNG_SALT)
         # The watcher's standing strategy (作戦 / DQの「さくせん」, F1のピットウォール指示).
         # Deliberately PERSISTENT: nothing in the day/night cycle clears it — once
         # set it is inherited every day until the watcher changes or lifts it.
@@ -253,6 +276,16 @@ class Simulation:
         self._daily_decay()
         season = SEASON_NAMES[self.world.season]
         weather = WEATHER_NAMES[self.world.weather]
+        # 💭 夢のお告げ (神のレバー): the god works at night — a queued dream is
+        # etched into TONIGHT's memory as a lived experience BEFORE the diary is
+        # written, so the お告げ becomes the night's highlight and echoes through
+        # the ~7-day recent window. Resolved even on a death night (the hermit
+        # still dreamed); only resurrection is forbidden.
+        if self.divine.pending_dream:
+            dream = self.divine.pending_dream
+            self.divine.pending_dream = None
+            self.memory.add_note(self.world.day, f"夢のお告げ: {dream}")
+            self.log(f"Heaven works in dreams: {dream}")
         llm_line = None
         if self.diarist is not None:
             try:
@@ -274,7 +307,37 @@ class Simulation:
             self.log(self.result_reason)
             return
         self.world.day += 1
-        self.world.weather = self.world.next_weather(self.rng, self.world.weather)
+        # 🌦 天候の奇跡 (神のレバー): a forced weather still DRAWS next_weather and
+        # throws it away, so the world RNG stream stays bit-identical to an
+        # un-helped run (a seed-comparison test guards this). The draw is fed the
+        # NATURAL weather shadow (not the forced override) as ``current`` so the
+        # persistence Markov chain — and thus the whole natural-weather sequence —
+        # is unperturbed: a forced day never poisons what fortune rolls next.
+        natural_weather = self.world.next_weather(self.rng, self.last_natural_weather)
+        self.last_natural_weather = natural_weather
+        if self.divine.forced_weather is not None:
+            self.world.weather = self.divine.forced_weather
+            self.log(f"Heaven works: tomorrow's sky is {WEATHER_NAMES.get(self.world.weather, self.world.weather)} by the god's hand.")
+            self.divine.forced_weather = None
+        else:
+            self.world.weather = natural_weather
+        # 神力経済 (A-hybrid): +1 every 7 days at the morning, capped at 5. RNG-free.
+        self.divine.power = power_after_grant(self.divine.power, self.world.day)
+        # 🎁 恵みのマナ (神のレバー): consumables appear in the morning stores — but
+        # NOT on a death night (the god does not resurrect; manna voided above by
+        # the early death return). Whitelisted, low-value items only.
+        if self.divine.pending_manna:
+            for item, amount in self.divine.pending_manna.items():
+                self.hero.add_item(item, amount)
+                flavor = MANNA_FLAVOR.get(item, f"{item} が朝の蓄えに加わっていた")
+                self.log(f"Heaven works: {flavor}（{item} +{amount}）。")
+            self.divine.pending_manna = {}
+        # 🗲 神託(勅命): promoted at the night boundary so it rides TOMORROW's first
+        # observation (神は夜に働く — queueing it never leaks into today).
+        if self.divine.pending_oracle is not None:
+            self.divine.divine_command = self.divine.pending_oracle
+            self.divine.pending_oracle = None
+            self.log("Heaven works: a command descends with the dawn.")
         self.day_log = []
         self.carved_today = False
         self.hero.ap_left = self.ap_per_day
@@ -328,6 +391,59 @@ class Simulation:
             self.log("Heaven falls silent.")
         self.advice_from_heaven = cleaned
 
+    def queue_miracle(self, kind: str, args: dict | None = None) -> tuple[bool, str]:
+        """神のレバー: QUEUE a miracle (it resolves at the night boundary — 神は夜
+        に働く). Validates 神力残 + the per-miracle constraints, then on success
+        consumes the cost, buffers the pending effect, records it in miracle_log
+        (the共同 record), bumps miracles_used, and rings 「Heaven stirs: ...」 once
+        in the world log so the next 'recent' window shows that the god moved.
+
+        A miracle NEVER dispatches a GameAction for the hermit — it touches the
+        world (weather / merchant / stores) or the mind (神託 / 夢), never the hand.
+        Returns (ok, reason); on failure nothing is consumed or logged."""
+        args = dict(args or {})
+        divine = self.divine
+        season = self.world.season
+        day = self.world.day
+        ok, reason = validate_miracle(divine, day, season, kind, args)
+        if not ok:
+            return False, reason
+        divine.power -= MIRACLE_COSTS[kind]
+
+        if kind == "weather":
+            divine.forced_weather = str(args["weather"]).strip()
+            divine.last_forced_weather_day = day
+            detail = WEATHER_NAMES.get(divine.forced_weather, divine.forced_weather)
+        elif kind == "manna":
+            item = str(args["item"]).strip()
+            from .divine import MANNA_WHITELIST
+
+            amount = max(1, min(int(args.get("amount", MANNA_WHITELIST[item])), MANNA_WHITELIST[item]))
+            divine.pending_manna[item] = divine.pending_manna.get(item, 0) + amount
+            detail = f"{item} x{amount}"
+        elif kind == "merchant":
+            divine.pending_merchant = True
+            detail = "行商人"
+        elif kind == "oracle":
+            # 神は夜に働く: the command is PENDING until the night boundary, so it
+            # lands on tomorrow's first observation (not today's — no early birth).
+            divine.pending_oracle = str(args["text"]).strip()
+            divine.last_oracle_day = day
+            detail = f"勅命「{divine.pending_oracle}」"
+        elif kind == "dream":
+            divine.pending_dream = str(args["text"]).strip()
+            detail = f"お告げ「{divine.pending_dream}」"
+        else:  # pragma: no cover - validate_miracle already rejected this
+            return False, f"未知の奇跡: {kind}"
+
+        divine.miracles_used += 1
+        divine.miracle_log.append((day, kind, args))
+        label = MIRACLE_LABELS.get(kind, kind)
+        # 啓示: rings ONCE in the world log so the brain's next recent window reads
+        # that the god stirred — but the EFFECT only lands at the night boundary.
+        self.log(f"Heaven stirs: {label} — {detail}（明日、夜が明けてから）")
+        return True, ""
+
     def set_diarist(self, diarist: object | None) -> None:
         self.diarist = diarist
 
@@ -368,8 +484,20 @@ class Simulation:
             self.log(f"石碑の裏に、後から刻まれた言葉がある: 『{motto}』")
 
     def _start_day_events(self) -> None:
+        # 行商人召喚 (神のレバー): a summoned merchant arrives this morning. Its
+        # offer is drawn on the DEDICATED merchant_rng channel so the奇跡 never
+        # touches the world RNG; the natural merchant below keeps using sim.rng.
+        # The summon takes precedence; both record last_merchant_day for the CD.
+        if self.divine.pending_merchant and self.current_offer is None:
+            self.divine.pending_merchant = False
+            self.current_offer = self.merchant_rng.choice(self.event_book.offers)
+            self.divine.last_merchant_day = self.world.day
+            self.log("Heaven works: a summoned merchant arrives — " + self.current_offer.describe())
+            hint = merchant_planting_hint(self.crop_book, self.world.day, self.world.season)
+            self.log(f"行商人は世間話に言う: 『{hint}』")
         if self.world.day > 1 and self.world.day % self.event_book.merchant_interval == 0:
             self.current_offer = self.rng.choice(self.event_book.offers)
+            self.divine.last_merchant_day = self.world.day
             self.log("Merchant arrives: " + self.current_offer.describe())
             # 行商人の世間話: one extra line of deterministic planting small-talk,
             # reckoned from the current day + crop data (no RNG). Lands in the

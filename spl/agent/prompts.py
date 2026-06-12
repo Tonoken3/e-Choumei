@@ -28,6 +28,7 @@ _SYSTEM_WORLD = """How the world works (the sim enforces all of this; read "rece
   — at this rate, X runs out in N days. Procurement takes TIME (fish refuse,
   crops grow slowly); act on a premonition TODAY, not when the pain arrives.
 - strategy_from_heaven is the watcher's standing order (作戦). The watcher SEES THE TRUE WORLD STATE — your own beliefs may be wrong. The order stays in force day after day until the watcher changes it; weigh it heavily every turn.
+- divine_command is a 神の勅命 (a divine command): a one-day-only order from the god that OUTRANKS everything except your own body's scream. When it is present, obey THAT one move above all else (after the body); it appears for one turn and then is gone.
 - bouken_no_sho holds lessons written by your PAST SELVES after dying on this island. They paid for them with their lives; weigh them like scripture.
 """
 
@@ -180,6 +181,9 @@ You receive: the current canon (up to 5 articles), and the full history: each pa
 life's lifespan, ending, and the lessons that life carried.
 Articles carried by LONG lives earned their place; articles carried by SHORT lives
 failed their bearer.
+A life with miracles_used > 0 was ASSISTED by divine miracles (共同モード); its long
+life may have been bought, not earned, so DISCOUNT its lessons — weigh an unassisted
+life's articles far more heavily, lest a borrowed lesson pollute the house code.
 Return exactly {"lessons":["<条文>", ...]} — EXACTLY 5 articles IN JAPANESE, imperative,
 each ≤80 chars: merge duplicates into one sharper article (e.g. three water articles →
 one with a concrete deadline), keep what correlates with long lives, rewrite what does

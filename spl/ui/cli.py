@@ -180,16 +180,27 @@ def run_play(args: object) -> int:
             sim.step(action)
         else:
             if args.heaven and sys.stdin.isatty() and sim.world.day != last_day:
-                current = sim.advice_from_heaven or "（なし）"
-                advice = input(
-                    f"\n天の声 — 現在の作戦「{current}」"
-                    "（Enterで継承 / 文を入力で変更 / '-'で解除）: "
-                ).strip()
-                if advice in ("-", "clear"):
-                    sim.set_strategy(None)
-                elif advice:
-                    sim.set_strategy(advice)
-                # empty input keeps the standing 作戦 (it persists across days)
+                while True:
+                    current = sim.advice_from_heaven or "（なし）"
+                    power = sim.divine.power
+                    advice = input(
+                        f"\n天の声 — 作戦「{current}」 神力◆{power}"
+                        "（Enter継承 / 文で作戦変更 / '-'解除 / "
+                        "!天候 雨・!マナ fish・!商人・!神託 <文>・!夢 <文>）: "
+                    ).strip()
+                    # 神のレバー: a bang-command queues a miracle and re-prompts so
+                    # several miracles can be cast on one morning before play resumes.
+                    heaven = try_heaven_command(sim, advice)
+                    if heaven is not False:
+                        ok, msg = heaven
+                        print(("  奇跡を準備した: " if ok else "  ✗ ") + (msg or ("受理" if ok else "拒否")))
+                        continue
+                    if advice in ("-", "clear"):
+                        sim.set_strategy(None)
+                    elif advice:
+                        sim.set_strategy(advice)
+                    # empty input keeps the standing 作戦 (it persists across days)
+                    break
                 last_day = sim.world.day
             action = choose_action(sim, brain, local_agent, llm_enabled=args.llm)
             sim.step(action, confuse_on_invalid=args.llm)
@@ -333,6 +344,55 @@ def apply_persona(brain: object | None, args: object) -> None:
         brain.persona_mode = "append"
 
 
+# 神のレバー: the CLI bang-subcommands for the --heaven daily prompt. A miracle
+# is QUEUED (神は夜に働く) — never dispatched as a hand action. Maps the JP verb
+# to a (kind, arg-builder) so '!天候 雨' / '!マナ fish' / '!商人' / '!神託 <文>' /
+# '!夢 <文>' all route through sim.queue_miracle.
+_HEAVEN_WEATHER_JP = {
+    "晴": "sunny", "晴れ": "sunny", "sunny": "sunny",
+    "雨": "rain", "rain": "rain",
+    "嵐": "storm", "storm": "storm",
+    "旱": "drought", "干ばつ": "drought", "drought": "drought",
+    "雪": "snow", "snow": "snow",
+}
+_HEAVEN_MANNA_JP = {
+    "木の実": "berries", "berries": "berries",
+    "魚": "fish", "fish": "fish",
+    "きのこ": "mushroom", "茸": "mushroom", "mushroom": "mushroom",
+    "カブ種": "turnip_seed", "turnip_seed": "turnip_seed",
+    "小麦種": "wheat_seed", "wheat_seed": "wheat_seed",
+    "トマト種": "tomato_seed", "tomato_seed": "tomato_seed",
+    "カボチャ種": "pumpkin_seed", "pumpkin_seed": "pumpkin_seed",
+}
+
+
+def try_heaven_command(sim: object, line: str) -> bool | tuple[bool, str]:
+    """If ``line`` is a 神のレバー bang-subcommand, queue the miracle and return
+    (ok, message). Returns False (not a miracle command) when it doesn't start
+    with '!'. The caller prints the message. Recognised:
+      !天候 雨 / !マナ fish / !商人 / !神託 <文> / !夢 <文>."""
+    line = (line or "").strip()
+    if not line.startswith(("!", "！")):
+        return False
+    body = line[1:].strip()
+    parts = body.split(None, 1)
+    verb = parts[0] if parts else ""
+    rest = parts[1].strip() if len(parts) > 1 else ""
+    if verb in ("天候", "weather"):
+        target = _HEAVEN_WEATHER_JP.get(rest, rest)
+        return sim.queue_miracle("weather", {"weather": target})
+    if verb in ("マナ", "manna", "恵み"):
+        item = _HEAVEN_MANNA_JP.get(rest, rest)
+        return sim.queue_miracle("manna", {"item": item})
+    if verb in ("商人", "merchant"):
+        return sim.queue_miracle("merchant", {})
+    if verb in ("神託", "oracle", "勅命"):
+        return sim.queue_miracle("oracle", {"text": rest})
+    if verb in ("夢", "dream", "お告げ"):
+        return sim.queue_miracle("dream", {"text": rest})
+    return (False, f"未知の奇跡コマンド: !{verb}")
+
+
 def parse_manual_command(line: str) -> GameAction:
     if not line:
         raise ValueError("empty command")
@@ -474,6 +534,20 @@ def print_result(sim: Simulation, motto: dict[str, object] | None = None,
     print(f"Confusions: {sim.hero.confusion_count}")
     # 作戦: how directed was the run? (0回 = unassisted)
     print(f"作戦変更: {getattr(sim, 'strategy_changes', 0)}回")
+    # 神のレバー (共同): if any miracle was used, this life is the共同 category —
+    # separated from the canonical, unassisted record. Show the count + breakdown.
+    divine = getattr(sim, "divine", None)
+    miracles_used = int(getattr(divine, "miracles_used", 0) or 0)
+    if miracles_used > 0:
+        from collections import Counter
+
+        from spl.core.divine import MIRACLE_LABELS
+
+        counts = Counter(kind for _day, kind, _args in getattr(divine, "miracle_log", []))
+        breakdown = "、".join(
+            f"{MIRACLE_LABELS.get(k, k)}{n}" for k, n in counts.items()
+        )
+        print(f"【共同】奇跡: {miracles_used}回（{breakdown}）")
     if sim.advice_from_heaven:
         final = sim.advice_from_heaven
         shown = final if len(final) <= 40 else final[:39] + "…"

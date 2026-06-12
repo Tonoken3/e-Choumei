@@ -226,6 +226,10 @@ class BoukenNoSho:
                     "days": int(entry.get("days") or 0),
                     "ending": str(entry.get("ending") or "").strip(),
                     "lessons": [str(s).strip() for s in (entry.get("lessons") or []) if str(s).strip()],
+                    # 神のレバー: the共同 marker. The編纂者 reads this so an assisted
+                    # life's lessons are weighed lightly (偽教訓汚染ガード) — a long
+                    # life bought with miracles did not earn its articles unaided.
+                    "miracles_used": int(entry.get("miracles_used") or 0),
                 }
             )
         return table
@@ -268,6 +272,11 @@ def build_entry(sim: object, seed: int, motto: dict | None,
     empty string when no来歴 was given)."""
     motto = motto or {}
     lessons = list(motto.get("lessons") or [])
+    # 神のレバー (共同): how many miracles this life leaned on. >0 marks the life
+    # 共同 (co-op) — its lessons are 介助された生 and the編纂者 must discount them
+    # (偽教訓汚染ガード), so the canon of an unassisted lineage is never polluted.
+    divine = getattr(sim, "divine", None)
+    miracles_used = int(getattr(divine, "miracles_used", 0) or 0)
     return {
         "seed": seed,
         "days": getattr(sim.hero, "days_survived", 0),
@@ -279,6 +288,8 @@ def build_entry(sim: object, seed: int, motto: dict | None,
         # きびしさ: which island this life was lived on (every record stays
         # 修羅-canonical, so the book reads which runs are comparable).
         "difficulty": getattr(sim, "difficulty", "修羅"),
+        # 神のレバー: the共同 marker — miracle count for this life (0 = unassisted).
+        "miracles_used": miracles_used,
     }
 
 
@@ -313,21 +324,24 @@ def fallback_compile(book: "BoukenNoSho", cap: int = 5) -> list[str]:
     Dedupe rule: a lesson is dropped if (after normalization) it equals OR
     shares a 6+ char substring with an already-kept (i.e. longer-lived / newer)
     lesson — so three near-identical water articles collapse to one."""
-    # Rank every (lesson) by its bearer's lifespan desc, then life number desc
-    # (newest first among ties), preserving the lesson order within a life.
-    ranked: list[tuple[int, int, int, str]] = []
+    # Rank every (lesson) FIRST by whether its bearer was unassisted (神のレバー
+    # 偽教訓汚染ガード: an unassisted life's lessons always outrank an assisted
+    # life's), then by lifespan desc, then life number desc (newest first among
+    # ties), preserving the lesson order within a life.
+    ranked: list[tuple[int, int, int, int, str]] = []
     for entry in book.entries:
         days = int(entry.get("days") or 0)
         life = int(entry.get("life") or 0)
+        unassisted = 0 if int(entry.get("miracles_used") or 0) > 0 else 1
         for pos, lesson in enumerate(entry.get("lessons") or []):
             text = str(lesson).strip()
             if text:
-                ranked.append((days, life, -pos, text))
-    ranked.sort(key=lambda t: (t[0], t[1], t[2]), reverse=True)
+                ranked.append((unassisted, days, life, -pos, text))
+    ranked.sort(key=lambda t: (t[0], t[1], t[2], t[3]), reverse=True)
 
     kept: list[str] = []
     kept_norm: list[str] = []
-    for _days, _life, _pos, text in ranked:
+    for _unassisted, _days, _life, _pos, text in ranked:
         norm = _normalize_lesson(text)
         if not norm:
             continue

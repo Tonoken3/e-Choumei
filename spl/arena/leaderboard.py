@@ -17,6 +17,10 @@ class ArenaResult:
     # the canonical 修羅 benchmark (no --difficulty there), so this stays 修羅;
     # the column is omitted from render_leaderboard to keep the row width bounded.
     difficulty: str = "修羅"
+    # 神のレバー (共同): miracles leaned on this run. Arena runs are unassisted
+    # (no miracle director), so this stays 0; the field lets a共同 run be flagged
+    # if one is ever recorded. render_leaderboard is unchanged (row width bounded).
+    miracles_used: int = 0
 
 
 def select_meigen(lines: list[str], n: int = 5) -> list[str]:

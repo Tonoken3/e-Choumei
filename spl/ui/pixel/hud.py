@@ -336,6 +336,19 @@ class Hud:
         surf.blit(_render(f.label, inv_text[:80], pal.UI_TEXT), (rx, ry))
         ry += f.label.get_height() + lay.px(2)
 
+        # 神のレバー: the 神力 gauge — ◆ filled to the current power, ◇ to the cap.
+        # Only shown once any power exists (always, since the game starts at 3) so
+        # the watcher always sees how many levers are in hand.
+        divine = getattr(sim, "divine", None)
+        if divine is not None:
+            from spl.core.divine import POWER_CAP
+
+            power = int(getattr(divine, "power", 0) or 0)
+            pips = "◆" * power + "◇" * max(0, POWER_CAP - power)
+            gauge_text = f.jp(f"神力 {pips}", f"Power {pips}")
+            surf.blit(_render(f.label, gauge_text, pal.UI_GOLD), (rx, ry))
+            ry += f.label.get_height() + lay.px(2)
+
         for line in sim.full_log[-2:]:
             surf.blit(_render(f.label, line[:78], pal.UI_TEXT_DIM), (rx, ry))
             ry += f.label.get_height() + lay.px(1)
@@ -449,7 +462,7 @@ class Overlays:
             f.jp("移動: 矢印/WASD   E: その場の行動   O: 食べる",
                  "Move: arrows/WASD   E: context action   O: eat"),
             "X/V/Q/R/Z: " + f.jp("木/採掘/水/休/寝", "chop/mine/drink/rest/sleep") +
-            "    C/D/T: " + f.jp("作る/日記/作戦", "craft/diary/strategy"),
+            "    C/D/T/K: " + f.jp("作る/日記/作戦/奇跡", "craft/diary/strategy/miracle"),
             "1〜5: " + f.jp("速度(承認/遅/普/速/最速)", "speed (approve/slow/nrm/fast/max)") +
             "    M: " + f.jp("観戦⇔手動", "watch<->manual") + "    H: " + f.jp("ヘルプ", "help"),
             f.jp("ホイール/＋－: 寄る・引く   F: 仙人を追従   G: 八識熟考   右ドラッグ: 視点移動",
@@ -785,6 +798,146 @@ class Overlays:
         surf.blit(foot, (x, rect.bottom - foot.get_height() - lay.px(6)))
         return {"send": send, "cancel": cancel}
 
+    def draw_miracle(self, surf, sim, lay: Layout, text: str = "",
+                     status: str = "", mouse: tuple[int, int] | None = None):
+        """神のレバー — the divine miracle palette (共同モード). Shows the 神力
+        gauge, the five levers with their costs and one-click targets (weather
+        candidates for the season / manna whitelist / merchant), and a shared text
+        box for the two 言葉 miracles (神託 / 夢). EVERY label says 「明日—」 so the
+        night rule (神は夜に働く) is explicit: a click only QUEUES the miracle.
+
+        Returns a hit dict::
+            {"actions": [(rect, kind, args_or_None), ...], "box": rect}
+        where args_or_None None means a text-send (神託/夢) that reads the box.
+        The app dispatches each via sim.queue_miracle(...).
+        """
+        from spl.core.divine import (
+            MANNA_WHITELIST, MIRACLE_COSTS, POWER_CAP, SEASON_WEATHER_PALETTE,
+        )
+
+        pg = self.pg
+        f = self.f
+        mx, my = mouse if mouse else (-1, -1)
+        divine = getattr(sim, "divine", None)
+        power = int(getattr(divine, "power", 0) or 0)
+
+        def _hot(r) -> bool:
+            return r.collidepoint(mx, my)
+
+        rect = self._panel(surf, f.jp("神のレバー（共同モード）", "Divine Levers (Co-op)"), lay)
+        x = rect.x + lay.px(10)
+        y = rect.y + f.big.get_height() + lay.px(8)
+
+        # 神力 gauge: filled ◆ up to power, hollow ◇ up to the cap.
+        pips = "◆" * power + "◇" * max(0, POWER_CAP - power)
+        gauge = _render(f.body, f.jp(f"神力 {pips}  ({power}/{POWER_CAP})",
+                                     f"Divine power {pips}  ({power}/{POWER_CAP})"), pal.UI_GOLD)
+        surf.blit(gauge, (x, y))
+        y += gauge.get_height() + lay.px(2)
+        sub = _render(f.label, f.jp("奇跡はすべて『明日、夜が明けてから』効く（神は夜に働く）",
+                                    "Every miracle takes effect 'tomorrow, after the night' (the god works at night)"),
+                      pal.UI_TEXT_DIM)
+        surf.blit(sub, (x, y))
+        y += sub.get_height() + lay.px(8)
+
+        actions: list[tuple[object, str, dict | None]] = []
+        chip_h = f.body.get_height() + lay.px(8)
+        rad = lay.px(3)
+
+        def chip(label: str, cx: int, cy: int, kind: str, args: dict | None,
+                 enabled: bool) -> int:
+            w = f.label.size(label)[0] + lay.px(16)
+            r = pg.Rect(cx, cy, w, chip_h)
+            hot = enabled and _hot(r)
+            bg = pal.UI_PANEL_LIGHT if hot else pal.UI_PANEL
+            border = pal.UI_GOLD if hot else (pal.UI_BORDER if enabled else pal.STAT_BG)
+            pg.draw.rect(surf, bg, r, border_radius=rad)
+            pg.draw.rect(surf, border, r, max(1, lay.px(2)), border_radius=rad)
+            col = pal.UI_TEXT if enabled else pal.UI_TEXT_DIM
+            slab = _render(f.label, label, col)
+            surf.blit(slab, (r.centerx - slab.get_width() // 2, r.centery - slab.get_height() // 2))
+            if enabled:
+                actions.append((r, kind, args))
+            return cx + w + lay.px(6)
+
+        def lever_head(label: str, cost: int) -> None:
+            nonlocal y
+            afford = power >= cost
+            col = pal.UI_GOLD if afford else pal.UI_TEXT_DIM
+            head = _render(f.body, f"{label}  ({f.jp('神力', 'cost')}{cost})", col)
+            surf.blit(head, (x, y))
+            y += head.get_height() + lay.px(3)
+
+        # 天候の奇跡 — clickable weather candidates for the current season.
+        lever_head(f.jp("◇ 明日の天候を指定", "[Weather] Name tomorrow's weather"), MIRACLE_COSTS["weather"])
+        afford_w = power >= MIRACLE_COSTS["weather"]
+        cx = x + lay.px(6)
+        palette = SEASON_WEATHER_PALETTE.get(sim.world.season, ())
+        for wname in palette:
+            label = WEATHER_NAMES.get(wname, wname)
+            cx = chip(label, cx, y, "weather", {"weather": wname}, afford_w)
+        y += chip_h + lay.px(8)
+
+        # 恵みのマナ — clickable whitelist items.
+        lever_head(f.jp("◇ 明日の蓄えに恵みを", "[Manna] In tomorrow's stores"), MIRACLE_COSTS["manna"])
+        afford_m = power >= MIRACLE_COSTS["manna"]
+        cx = x + lay.px(6)
+        for item, cap in MANNA_WHITELIST.items():
+            label = f"{item}x{cap}"
+            cx = chip(label, cx, y, "manna", {"item": item}, afford_m)
+            if cx > rect.right - lay.px(120):  # wrap to a new chip row
+                cx = x + lay.px(6)
+                y += chip_h + lay.px(4)
+        y += chip_h + lay.px(8)
+
+        # 行商人を呼ぶ — single button.
+        lever_head(f.jp("◇ 明日、行商人を呼ぶ", "[Merchant] Summon tomorrow"), MIRACLE_COSTS["merchant"])
+        afford_s = power >= MIRACLE_COSTS["merchant"]
+        chip(f.jp("商人を呼ぶ", "Summon"), x + lay.px(6), y, "merchant", {}, afford_s)
+        y += chip_h + lay.px(10)
+
+        # 神託 / 夢 — a shared text box + two send buttons.
+        surf.blit(_render(f.body, f.jp("◇ 神託(勅命) / 夢のお告げ — 言葉を入力（CTRL+Vで貼り付け）",
+                                       "[Oracle] / [Dream] — type the words (CTRL+V to paste)"),
+                          pal.UI_TEXT), (x, y))
+        y += f.body.get_height() + lay.px(5)
+        box_h = f.body.get_height() + lay.px(8)
+        box = pg.Rect(x, y, rect.width - lay.px(20), box_h)
+        pg.draw.rect(surf, pal.UI_PANEL_LIGHT, box)
+        pg.draw.rect(surf, pal.UI_BORDER, box, max(1, lay.px(2)))
+        surf.blit(_render(f.body, text + "_", pal.UI_TEXT), (box.x + lay.px(4), box.y + lay.px(3)))
+        y = box.bottom + lay.px(8)
+        btn_h = f.body.get_height() + lay.px(10)
+        afford_o = power >= MIRACLE_COSTS["oracle"] and bool(text.strip())
+        afford_d = power >= MIRACLE_COSTS["dream"] and bool(text.strip())
+        o_label = f.jp(f"明日の勅命にする（神力{MIRACLE_COSTS['oracle']}）",
+                       f"Make oracle ({MIRACLE_COSTS['oracle']})")
+        d_label = f.jp(f"今夜の夢にする（神力{MIRACLE_COSTS['dream']}）",
+                       f"Make dream ({MIRACLE_COSTS['dream']})")
+        ow = f.body.size(o_label)[0] + lay.px(16)
+        send_o = pg.Rect(x, y, ow, btn_h)
+        dw = f.body.size(d_label)[0] + lay.px(16)
+        send_d = pg.Rect(send_o.right + lay.px(10), y, dw, btn_h)
+        for b, label, enabled, kind in ((send_o, o_label, afford_o, "oracle"),
+                                        (send_d, d_label, afford_d, "dream")):
+            hot = enabled and _hot(b)
+            pg.draw.rect(surf, pal.UI_PANEL_LIGHT if hot else pal.UI_PANEL, b, border_radius=rad)
+            pg.draw.rect(surf, pal.UI_GOLD if hot else (pal.UI_BORDER if enabled else pal.STAT_BG),
+                         b, max(1, lay.px(2)), border_radius=rad)
+            col = pal.UI_TEXT if enabled else pal.UI_TEXT_DIM
+            slab = _render(f.body, label, col)
+            surf.blit(slab, (b.centerx - slab.get_width() // 2, b.centery - slab.get_height() // 2))
+            if enabled:
+                actions.append((b, kind, None))  # None -> read the text box
+        y = send_o.bottom + lay.px(8)
+
+        if status:
+            surf.blit(_render(f.label, status, pal.UI_GOLD), (x, y))
+        foot = _render(f.label, f.jp("Esc で閉じる（神力は7日ごとに+1・上限5）",
+                                     "Esc to close (神力 +1 every 7 days, cap 5)"), pal.UI_TEXT_DIM)
+        surf.blit(foot, (x, rect.bottom - foot.get_height() - lay.px(6)))
+        return {"actions": actions, "box": box}
+
     def draw_pitwall(self, surf, sim, lay: Layout, mouse: tuple[int, int] | None = None):
         """承認制 pit-wall: a compact bottom-third strip shown at a day boundary.
         Shows last night's diary, the current stats line, the standing 作戦, and
@@ -851,16 +1004,22 @@ class Overlays:
                 emit(ln, pal.UI_TEXT, indent=lay.px(6))
         else:
             emit(f.jp("（まだ日記はない）", "(no diary yet)"), pal.UI_TEXT_DIM, indent=lay.px(6))
-        nxt = pg.Rect(x, by, lay.px(200), btn_h)
-        edit = pg.Rect(nxt.right + lay.px(12), by, lay.px(200), btn_h)
+        nxt = pg.Rect(x, by, lay.px(190), btn_h)
+        edit = pg.Rect(nxt.right + lay.px(10), by, lay.px(160), btn_h)
+        # 神のレバー: a quick-access button to the miracle palette right here at the
+        # pit wall — the watcher reviews the night, then casts before resuming. The
+        # 神力 in hand is shown on the button so the lever count is at a glance.
+        power = int(getattr(getattr(sim, "divine", None), "power", 0) or 0)
+        miracle = pg.Rect(edit.right + lay.px(10), by, lay.px(190), btn_h)
         for b, label in ((nxt, f.jp("次の日へ（Enter）", "Next day (Enter)")),
-                         (edit, f.jp("作戦を変える", "Change order"))):
+                         (edit, f.jp("作戦を変える", "Change order")),
+                         (miracle, f.jp(f"奇跡 ◆{power}", f"Miracle ◆{power}"))):
             hot = b.collidepoint(mx, my)
             pg.draw.rect(surf, pal.UI_PANEL_LIGHT if hot else pal.UI_PANEL, b, border_radius=lay.px(3))
             pg.draw.rect(surf, pal.UI_GOLD if hot else pal.UI_BORDER, b, max(1, lay.px(2)), border_radius=lay.px(3))
             slab = _render(f.body, label, pal.UI_TEXT)
             surf.blit(slab, (b.centerx - slab.get_width() // 2, b.centery - slab.get_height() // 2))
-        return {"next": nxt, "edit": edit}
+        return {"next": nxt, "edit": edit, "miracle": miracle}
 
     def draw_result(self, surf, sim, lay: Layout, hover: str = "",
                     motto: dict | None = None, motto_pending: bool = False,
@@ -937,6 +1096,21 @@ class Overlays:
             "",
             f.jp("銘言ベスト5:", "Best lines:"),
         ]
+        # 神のレバー (共同): if any miracle was leaned on, this life is 共同 (co-op),
+        # separated from the canonical unassisted record. Show the count + breakdown
+        # just above the 銘言ベスト5 marker so it reads as part of the 戦績.
+        divine = getattr(sim, "divine", None)
+        miracles_used = int(getattr(divine, "miracles_used", 0) or 0)
+        if miracles_used > 0:
+            from collections import Counter
+
+            from spl.core.divine import MIRACLE_LABELS
+
+            counts = Counter(kind for _d, kind, _a in getattr(divine, "miracle_log", []))
+            breakdown = "、".join(f"{MIRACLE_LABELS.get(k, k)}{n}" for k, n in counts.items())
+            info.insert(len(info) - 2,
+                        f.jp(f"【共同】奇跡: {miracles_used}回（{breakdown}）",
+                             f"[Co-op] miracles: {miracles_used}"))
         # If a 作戦 was standing at the end, show it (truncated) so the 戦績 reads
         # whether the run was unassisted (0回) or directed. Insert just BEFORE the
         # blank+「銘言ベスト5」 marker so a きびしさ line above doesn't shift it.

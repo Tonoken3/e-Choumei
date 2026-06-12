@@ -190,10 +190,15 @@ class PixelApp:
         # regardless. Inert when the cassette has no parallel budget.
         self.deliberate_mode = bool(getattr(args, "deliberate", False))
         self.paused = False
-        self.overlay: str | None = None  # diary | help | craft | heaven | eat | carve
+        self.overlay: str | None = None  # diary | help | craft | heaven | eat | carve | miracle
         self.diary_scroll = 0
         self.craft_sel = 0
         self.heaven_text = ""
+        # 神のレバー (共同モード): the 神託/夢 text box and the last status line shown
+        # in the miracle palette (e.g. "神力が足りぬ"). Reuses the 作戦 input
+        # machinery (TEXTINPUT + CTRL+V).
+        self.miracle_text = ""
+        self.miracle_status = ""
         # 刻む: the text being composed for the 句 carved into the stone (its own
         # overlay, mirroring the 作戦/heaven input box: IME + CTRL+V + Enter送る).
         self.carve_text = ""
@@ -654,6 +659,7 @@ class PixelApp:
             ("craft", f.jp("作る", "Craft"), f.jp("道具や建物を作る", "craft & build")),
             ("eat", f.jp("食べる", "Eat"), f.jp("持ち物を食べる", "eat from inventory")),
             ("heaven", f.jp("作戦", "Strategy"), f.jp("仙人に作戦を授ける（天の声）", "set the standing order")),
+            ("miracle", f.jp("奇跡", "Miracle"), f.jp("神のレバー：天候/マナ/商人/神託/夢（共同モード）", "divine levers (co-op)")),
             ("help", f.jp("ヘルプ", "Help"), f.jp("操作の説明", "how to play")),
             ("zoom_out", "－", f.jp("引く（ホイール下）", "zoom out (wheel)")),
             ("zoom_in", "＋", f.jp("寄る（ホイール上）", "zoom in (wheel)")),
@@ -979,6 +985,10 @@ class PixelApp:
         elif key == "heaven":
             self.overlay = "heaven"
             self.heaven_text = self.sim.advice_from_heaven or ""
+        elif key == "miracle":
+            self.overlay = "miracle"
+            self.miracle_text = ""
+            self.miracle_status = ""
         elif key == "help":
             self.overlay = "help"
         elif key == "zoom_in":
@@ -1042,6 +1052,16 @@ class PixelApp:
                 self.overlay = None
                 return
             return
+        if self.overlay == "miracle":
+            # 神のレバー: a click on a lever/chip/send-button QUEUES that miracle
+            # (it resolves at the night boundary). The box click is ignored (the
+            # box is filled by typing); a click elsewhere stays in the palette so
+            # several miracles can be cast before Esc closes it.
+            for (r, kind, args) in self._hits.get("miracle_actions", []):
+                if r.collidepoint(wx, wy):
+                    self._queue_miracle_ui(kind, args)
+                    return
+            return
         if self.overlay in {"diary", "help"}:
             self.overlay = None
 
@@ -1049,12 +1069,19 @@ class PixelApp:
         hits = self._hits.get("pitwall") or {}
         nxt = hits.get("next")
         edit = hits.get("edit")
+        miracle = hits.get("miracle")
         if nxt is not None and nxt.collidepoint(wx, wy):
             self._resume_next_day()
             return True
         if edit is not None and edit.collidepoint(wx, wy):
             self.overlay = "heaven"
             self.heaven_text = self.sim.advice_from_heaven or ""
+            return True
+        # 神のレバー: pit-wall quick access to the miracle palette.
+        if miracle is not None and miracle.collidepoint(wx, wy):
+            self.overlay = "miracle"
+            self.miracle_text = ""
+            self.miracle_status = ""
             return True
         return False
 
@@ -1238,6 +1265,53 @@ class PixelApp:
             return
         self.sim.step(GameAction.safe("carve", text=text), confuse_on_invalid=False)
 
+    # -- 神のレバー (共同モード) ---------------------------------------------
+    def _queue_miracle_ui(self, kind: str, args: dict | None) -> None:
+        """Queue a miracle from the palette. For the two 言葉 miracles (神託/夢)
+        ``args`` is None and the text comes from the box. Updates the status line
+        (success or the rejection reason) and clears the box on success so the
+        palette stays open for the next lever (神は夜に働く — nothing happens now).
+        A miracle NEVER dispatches a hand action; it only calls queue_miracle."""
+        if args is None:  # text-send: 神託 / 夢
+            text = self.miracle_text.strip()
+            if not text:
+                self.miracle_status = self.fonts.jp("言葉を入力せよ", "type the words first")
+                return
+            args = {"text": text}
+        ok, reason = self.sim.queue_miracle(kind, args)
+        from spl.core.divine import MIRACLE_LABELS
+
+        label = MIRACLE_LABELS.get(kind, kind)
+        if ok:
+            self.miracle_status = self.fonts.jp(f"{label}を準備した（明日、夜が明けてから）",
+                                                f"{label} queued (tomorrow, after the night)")
+            if kind in ("oracle", "dream"):
+                self.miracle_text = ""
+        else:
+            self.miracle_status = self.fonts.jp(f"✗ {reason}", f"x {reason}")
+
+    def _paste_into_miracle(self) -> None:
+        """CTRL+V into the 神託/夢 box. Mirrors _paste_into_heaven (pygame has no
+        IME, so Japanese is composed elsewhere and pasted), capped at 60 chars."""
+        text = ""
+        pg = self.pg
+        try:
+            if hasattr(pg, "scrap") and getattr(pg.scrap, "get_init", lambda: False)():
+                raw = pg.scrap.get(pg.SCRAP_TEXT)
+                if raw:
+                    text = raw.decode("utf-8", "ignore") if isinstance(raw, bytes) else str(raw)
+        except Exception:  # noqa: BLE001
+            text = ""
+        if not text:
+            try:
+                text = pg.scrap.get_text() or ""
+            except Exception:  # noqa: BLE001
+                text = ""
+        if not text:
+            return
+        text = text.replace("\r", "").split("\n", 1)[0]
+        self.miracle_text = (self.miracle_text + text)[:60]
+
     # -- events --------------------------------------------------------------
     def _handle_key(self, key) -> None:
         pg = self.pg
@@ -1276,6 +1350,23 @@ class PixelApp:
                 self.carve_text = self.carve_text[:-1]
             elif key == pg.K_v and (mods & pg.KMOD_CTRL):
                 self._paste_into_carve()
+            else:
+                pass  # printable text arrives via TEXTINPUT (IME-composed too)
+            return
+
+        # 神のレバー: the palette's 神託/夢 box. Esc closes the palette; Backspace
+        # edits; CTRL+V pastes. There are TWO sends (神託/夢) so Enter is reserved
+        # for 神託 (the costlier 勅命) as a convenience. Levers/chips are clicked.
+        if self.overlay == "miracle":
+            mods = pg.key.get_mods()
+            if key == pg.K_ESCAPE:
+                self.overlay = None
+            elif key == pg.K_BACKSPACE:
+                self.miracle_text = self.miracle_text[:-1]
+            elif key == pg.K_v and (mods & pg.KMOD_CTRL):
+                self._paste_into_miracle()
+            elif key == pg.K_RETURN and self.miracle_text.strip():
+                self._queue_miracle_ui("oracle", None)
             else:
                 pass  # printable text arrives via TEXTINPUT (IME-composed too)
             return
@@ -1360,6 +1451,12 @@ class PixelApp:
         if key == pg.K_t:
             self.overlay = "heaven"
             self.heaven_text = self.sim.advice_from_heaven or ""
+            return
+        if key == pg.K_k:
+            # 神のレバー (共同モード) palette
+            self.overlay = "miracle"
+            self.miracle_text = ""
+            self.miracle_status = ""
             return
         if key == pg.K_m:
             self.manual = not self.manual
@@ -1854,6 +1951,12 @@ class PixelApp:
             )
             self._hits["carve_send"] = hits.get("send")
             self._hits["carve_cancel"] = hits.get("cancel")
+        elif self.overlay == "miracle":
+            hits = self.overlays.draw_miracle(
+                window, self.sim, lay, self.miracle_text, self.miracle_status,
+                self.mouse_win,
+            )
+            self._hits["miracle_actions"] = hits.get("actions", [])
         elif self.popup is not None:
             self._draw_popup(window)
 
@@ -1914,7 +2017,7 @@ class PixelApp:
             return
         if self.manual and self.walk_target is not None and self.overlay is None:
             self._walk_step(now)
-        if self.overlay in {"craft", "diary", "help", "heaven", "eat", "carve"}:
+        if self.overlay in {"craft", "diary", "help", "heaven", "eat", "carve", "miracle"}:
             return
         # 承認制: hold at the day boundary until the watcher taps [次の日へ].
         if self.approval_pause:
@@ -1949,6 +2052,8 @@ class PixelApp:
                         self.heaven_text = (self.heaven_text + event.text)[:60]
                     elif self.overlay == "carve" and event.text:
                         self.carve_text = (self.carve_text + event.text)[:60]
+                    elif self.overlay == "miracle" and event.text:
+                        self.miracle_text = (self.miracle_text + event.text)[:60]
                 elif event.type == pg.MOUSEMOTION:
                     self._handle_motion(*event.pos)
                 elif event.type == pg.MOUSEBUTTONDOWN:
@@ -1965,7 +2070,7 @@ class PixelApp:
                 elif event.type == pg.MOUSEBUTTONUP:
                     if event.button in (2, 3):
                         self._end_pan()
-            want_ti = self.overlay in {"heaven", "carve"}
+            want_ti = self.overlay in {"heaven", "carve", "miracle"}
             if want_ti != self._text_input_on:
                 try:  # enables the OS IME (Japanese composition) over the input box
                     (pg.key.start_text_input if want_ti else pg.key.stop_text_input)()
