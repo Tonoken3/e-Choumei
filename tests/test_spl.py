@@ -1885,9 +1885,9 @@ class MonumentPixelTests(unittest.TestCase):
 
     def test_monument_tile_is_deterministic_near_home_and_walkable(self) -> None:
         app = self._app()
-        pos = app._monument_pos()
-        # deterministic: the same app yields the same tile every call
-        self.assertEqual((pos.x, pos.y), (app._monument_pos().x, app._monument_pos().y))
+        pos = app.sim.world.monument_pos
+        # deterministic: the same world yields the same tile every read
+        self.assertEqual((pos.x, pos.y), (app.sim.world.monument_pos.x, app.sim.world.monument_pos.y))
         # near home, never on water / home / workshop
         home = app.sim.world.start_pos
         self.assertLessEqual(abs(pos.x - home.x) + abs(pos.y - home.y), 4)
@@ -1896,7 +1896,7 @@ class MonumentPixelTests(unittest.TestCase):
 
     def test_tile_header_names_the_monument(self) -> None:
         app = self._app()
-        header = app._tile_header(app._monument_pos())
+        header = app._tile_header(app.sim.world.monument_pos)
         self.assertIn("古い石碑", app.fonts.jp("古い石碑", "Old Stone Monument"))
         self.assertIn(app.fonts.jp("古い石碑", "Old Stone Monument"), header)
 
@@ -1908,6 +1908,247 @@ class MonumentPixelTests(unittest.TestCase):
         # the full voxel pipeline (which blits the stele on its tile) renders
         win = app.pg.Surface((app.lay.win_w, app.lay.win_h))
         app.render(win)  # must not raise
+
+
+class KizamuTests(unittest.TestCase):
+    """刻む (carve): the hermit's voluntary verse cut into the old stone, and its
+    trans-generational persistence (per cassette+island)."""
+
+    def _sim_at_stone(self, seed: int = 42, days: int = 12) -> Simulation:
+        sim = Simulation(seed=seed, max_days=days)
+        sim.hero.pos = sim.world.monument_pos
+        return sim
+
+    # -- the action ---------------------------------------------------------
+    def test_carve_action_word_registered(self) -> None:
+        from spl.core.actions import ACTION_WORDS
+
+        self.assertIn("carve", ACTION_WORDS)
+
+    def test_carve_success_adjacent_spends_ap_and_logs(self) -> None:
+        sim = self._sim_at_stone()
+        ap0 = sim.hero.ap_left
+        result = sim.step(GameAction.safe("carve", text="ゆく河の流れは絶えずして"))
+        self.assertTrue(result.ok, result.message)
+        self.assertEqual(sim.hero.ap_left, ap0 - 1)
+        self.assertEqual(sim.carvings_made, [(sim.world.day, "ゆく河の流れは絶えずして")])
+        self.assertTrue(any("Carved into the stone" in ln for ln in sim.full_log))
+        # 銘言 pool stays pure: a carve never appends to spoken_lines.
+        self.assertEqual(sim.hero.spoken_lines, [])
+
+    def test_carve_from_diagonal_neighbor_succeeds(self) -> None:
+        sim = Simulation(seed=42, max_days=12)
+        stone = sim.world.monument_pos
+        from spl.core.hero import Position
+
+        sim.hero.pos = Position(stone.x + 1, stone.y + 1)  # Chebyshev 1 (diagonal)
+        result = sim.step(GameAction.safe("carve", text="月がふたつ"))
+        self.assertTrue(result.ok, result.message)
+
+    def test_carve_fails_when_far_from_stone(self) -> None:
+        sim = Simulation(seed=42, max_days=12)
+        stone = sim.world.monument_pos
+        from spl.core.hero import Position
+
+        # two tiles away on each axis -> Chebyshev 2, out of reach
+        sim.hero.pos = Position(stone.x + 2, stone.y + 2)
+        ap0 = sim.hero.ap_left
+        result = sim.step(GameAction.safe("carve", text="遠い"))
+        self.assertFalse(result.ok)
+        self.assertIn("石碑のそばでなければ", result.message)
+        # a world-reject fumbles -1 AP, but no carving is recorded
+        self.assertEqual(sim.carvings_made, [])
+        self.assertEqual(sim.hero.ap_left, ap0 - 1)
+
+    def test_carve_rejects_over_60_chars(self) -> None:
+        sim = self._sim_at_stone()
+        result = sim.step(GameAction.safe("carve", text="あ" * 61))
+        self.assertFalse(result.ok)
+        self.assertEqual(sim.carvings_made, [])
+
+    def test_carve_rejects_empty_text(self) -> None:
+        sim = self._sim_at_stone()
+        result = sim.step(GameAction.safe("carve", text="   "))
+        self.assertFalse(result.ok)
+        self.assertEqual(sim.carvings_made, [])
+
+    def test_second_carve_same_day_fails_then_allowed_next_day(self) -> None:
+        sim = self._sim_at_stone()
+        first = sim.step(GameAction.safe("carve", text="一句目"))
+        self.assertTrue(first.ok)
+        second = sim.step(GameAction.safe("carve", text="二句目"))
+        self.assertFalse(second.ok)
+        self.assertIn("chisel needs rest", second.message)
+        self.assertEqual(len(sim.carvings_made), 1)
+        # roll to the next day; the chisel may carve again
+        day0 = sim.world.day
+        sim.end_day()
+        self.assertEqual(sim.world.day, day0 + 1)
+        self.assertFalse(sim.carved_today)
+        sim.hero.pos = sim.world.monument_pos
+        third = sim.step(GameAction.safe("carve", text="翌日の句"))
+        self.assertTrue(third.ok, third.message)
+        self.assertEqual(len(sim.carvings_made), 2)
+
+    # -- persistence round-trip --------------------------------------------
+    def test_stone_persistence_round_trip(self) -> None:
+        import os
+        import tempfile
+
+        from spl.agent.bouken import append_carvings, load_stone, stone_path_for
+
+        with tempfile.TemporaryDirectory() as tmp:
+            old = os.environ.get("SPL_BOOK_DIR")
+            os.environ["SPL_BOOK_DIR"] = tmp
+            try:
+                path = stone_path_for("StoneCass")
+                self.assertEqual(load_stone(path), [])
+                append_carvings(path, seed=42, day_texts=[(3, "水を掘れ"), (5, "火を建てよ")], life=1)
+                rows = load_stone(path)
+                self.assertEqual([r["text"] for r in rows], ["水を掘れ", "火を建てよ"])
+                self.assertEqual(rows[0]["seed"], 42)
+                self.assertEqual(rows[0]["day"], 3)
+                self.assertEqual(rows[1]["life"], 1)
+                # a second life appends, never overwrites
+                append_carvings(path, seed=42, day_texts=[(2, "翌世の句")], life=2)
+                self.assertEqual(len(load_stone(path)), 3)
+                # empty day_texts is a true no-op
+                append_carvings(path, seed=42, day_texts=[], life=3)
+                self.assertEqual(len(load_stone(path)), 3)
+            finally:
+                if old is None:
+                    os.environ.pop("SPL_BOOK_DIR", None)
+                else:
+                    os.environ["SPL_BOOK_DIR"] = old
+
+    def test_set_stone_carvings_logs_and_observer_mentions_senjin(self) -> None:
+        from spl.agent.observer import ObservationBuilder
+
+        sim = Simulation(seed=42, max_days=12)
+        sim.set_stone_carvings(["ゆく河の流れ", "実りより先に種を数えよ"])
+        # day-1 log carries the 先人の手で句が line for each verse
+        self.assertTrue(any("先人の手で句が刻まれている" in ln for ln in sim.full_log))
+        obs = ObservationBuilder().build(sim)
+        self.assertIn("先人の句", obs["monument"])
+        self.assertIn("ゆく河の流れ", obs["monument"])
+
+    def test_carve_then_persist_then_new_sim_inherits(self) -> None:
+        """End-to-end: carve in life 1, persist, then a fresh sim fed the stone's
+        carvings shows the day-1 先人の手で句が log and the observer monument
+        mentions 先人の句."""
+        import os
+        import tempfile
+
+        from spl.agent.bouken import append_carvings, load_stone, stone_path_for
+        from spl.agent.observer import ObservationBuilder
+
+        with tempfile.TemporaryDirectory() as tmp:
+            old = os.environ.get("SPL_BOOK_DIR")
+            os.environ["SPL_BOOK_DIR"] = tmp
+            try:
+                # life 1: carve a verse
+                sim1 = self._sim_at_stone(seed=7)
+                self.assertTrue(sim1.step(GameAction.safe("carve", text="先人の一句")).ok)
+                path = stone_path_for("EndToEnd")
+                append_carvings(path, seed=7, day_texts=sim1.carvings_made, life=0)
+                # life 2 (same seed): inherit the most-recent 3 same-seed verses
+                rows = load_stone(path)
+                same = [r["text"] for r in rows if r["seed"] == 7][-3:]
+                sim2 = Simulation(seed=7, max_days=12)
+                sim2.set_stone_carvings(same)
+                self.assertTrue(any("先人の手で句が刻まれている" in ln for ln in sim2.full_log))
+                obs = ObservationBuilder().build(sim2)
+                self.assertIn("先人の句", obs["monument"])
+                self.assertIn("先人の一句", obs["monument"])
+            finally:
+                if old is None:
+                    os.environ.pop("SPL_BOOK_DIR", None)
+                else:
+                    os.environ["SPL_BOOK_DIR"] = old
+
+    # -- briefing / determinism --------------------------------------------
+    def test_briefing_carries_the_carve_hint(self) -> None:
+        from spl.agent.prompts import SYSTEM_PROMPT
+
+        self.assertIn("carve", SYSTEM_PROMPT)
+        self.assertIn("an old stone", SYSTEM_PROMPT)
+        self.assertIn("One cut per day", SYSTEM_PROMPT)
+
+    def test_local_policy_never_carves_and_stays_deterministic(self) -> None:
+        # The local policy can't emit carve (policy.py untouched), so two same-seed
+        # local runs stay bit-identical and neither leaves a carving.
+        left = run_local(seed=45, days=30)
+        right = run_local(seed=45, days=30)
+        self.assertEqual(left.full_log, right.full_log)
+        self.assertEqual(left.carvings_made, [])
+        self.assertEqual(right.carvings_made, [])
+
+    def test_local_policy_source_has_no_carve(self) -> None:
+        import inspect
+
+        from spl.agent import policy
+
+        self.assertNotIn("carve", inspect.getsource(policy))
+
+
+@unittest.skipUnless(_HAS_PYGAME, "pygame not installed")
+class KizamuPixelTests(unittest.TestCase):
+    """刻む in the voxel diorama: the popup item + the carve overlay dispatch."""
+
+    def _app(self):
+        from types import SimpleNamespace
+
+        from spl.ui.pixel.app import PixelApp
+
+        args = SimpleNamespace(
+            seed=42, days=112, llm=False, cassette="x", manual=True, speed=2,
+            scale=2, start_day=0, shots=0, shots_ui=False, shot_dir="/tmp/spl_test",
+            strategy=None, tps=0.0,
+        )
+        return PixelApp(args, headless=True)
+
+    def test_popup_on_monument_tile_when_adjacent_shows_carve_item(self) -> None:
+        from spl.ui.pixel import iso
+
+        app = self._app()
+        app.manual = True
+        stone = app.sim.world.monument_pos
+        app.sim.hero.pos = stone  # standing on the stone (Chebyshev 0)
+        cx, cy = iso.tile_center(stone.x, stone.y, app.offset_x, app.offset_y,
+                                 app.lay.sprite_scale)
+        app._handle_click(cx, cy)
+        self.assertIsNotNone(app.popup)
+        labels = [it.label for it in app.popup["items"]]
+        carve_label = app.fonts.jp("句を刻む", "Carve a verse")
+        self.assertIn(carve_label, labels)
+        # the carve item opens the text overlay (does not dispatch directly)
+        item = next(it for it in app.popup["items"] if it.label == carve_label)
+        self.assertEqual(item.action, "carve_open")
+        app._activate_menu_item(item)
+        self.assertEqual(app.overlay, "carve")
+
+    def test_carve_overlay_send_dispatches_the_action(self) -> None:
+        app = self._app()
+        app.manual = True
+        app.sim.hero.pos = app.sim.world.monument_pos
+        app.overlay = "carve"
+        app.carve_text = "鴨長明の句"
+        win = app.pg.Surface((app.lay.win_w, app.lay.win_h))
+        app.render(win)  # populate the carve hit rects
+        send = app._hits.get("carve_send")
+        self.assertIsNotNone(send)
+        app._click_overlay(send.centerx, send.centery)
+        self.assertEqual(app.overlay, None)
+        self.assertEqual([t for (_d, t) in app.sim.carvings_made], ["鴨長明の句"])
+
+    def test_carve_overlay_esc_cancels_without_carving(self) -> None:
+        app = self._app()
+        app.sim.hero.pos = app.sim.world.monument_pos
+        app.overlay = "carve"
+        app.carve_text = "破棄される句"
+        app._handle_key(app.pg.K_ESCAPE)
+        self.assertIsNone(app.overlay)
+        self.assertEqual(app.sim.carvings_made, [])
 
 
 if __name__ == "__main__":

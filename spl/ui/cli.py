@@ -7,9 +7,12 @@ import time
 
 from spl.agent.bouken import (
     BoukenNoSho,
+    append_carvings,
     build_entry,
     fallback_compile,
     inject_into_observer,
+    load_stone,
+    stone_path_for,
 )
 from spl.agent.llm_client import OpenAICompatibleBrain, find_cassette
 from spl.agent.observer import ObservationBuilder
@@ -70,6 +73,33 @@ def _book_epitaphs(book: "BoukenNoSho") -> list[str]:
     return [m for m in mottos if m][-2:]
 
 
+def _load_stone(args: object, brain: object | None, sim: object) -> None:
+    """刻む: load this cassette+island's carved stone and hand the最新3句 of the
+    SAME seed to the sim BEFORE play, so a hermit reads what past hermits chose
+    to leave. INDEPENDENT of --book (the stone always remembers)."""
+    seed = int(getattr(args, "seed", 0) or 0)
+    entries = load_stone(stone_path_for(_book_cassette_name(args, brain)))
+    same_seed = [e["text"] for e in entries if int(e.get("seed", 0)) == seed]
+    sim.set_stone_carvings(same_seed[-3:])
+
+
+def _persist_stone(args: object, brain: object | None, sim: object) -> None:
+    """刻む: at run end, append any 句 this hermit voluntarily carved (with their
+    days) to the cassette+island's stone, so the next hermit inherits them. The
+    life number is the book's count when available, else 0."""
+    carvings = list(getattr(sim, "carvings_made", []) or [])
+    if not carvings:
+        return
+    life = 0
+    if getattr(args, "book", False):
+        try:
+            life = BoukenNoSho.for_cassette(_book_cassette_name(args, brain)).lives
+        except Exception:  # noqa: BLE001 - the stone must never crash a run
+            life = 0
+    append_carvings(stone_path_for(_book_cassette_name(args, brain)),
+                    int(getattr(args, "seed", 0) or 0), carvings, life=life)
+
+
 def _record_life(book: "BoukenNoSho | None", sim: object, seed: int,
                  motto: dict | None, brain: object | None = None) -> dict | None:
     """Append this ended run to the book (once), then 編纂: revise the fixed
@@ -105,6 +135,7 @@ def run_play(args: object) -> int:
     brain = _make_brain(args)
     observer = ObservationBuilder()
     book = _load_book(args, brain if args.llm else None, sim)
+    _load_stone(args, brain if args.llm else None, sim)
     last_day = sim.world.day
     if args.llm and brain is not None:
         sim.set_diarist(brain)
@@ -165,6 +196,7 @@ def run_play(args: object) -> int:
         _clear()
     motto = _final_motto(sim, brain if args.llm else None)
     entry = _record_life(book, sim, args.seed, motto, brain if args.llm else None)
+    _persist_stone(args, brain if args.llm else None, sim)
     print_result(sim, motto=motto, brain=brain if args.llm else None,
                  book=book, book_entry=entry)
     return 0 if sim.completed else 1
@@ -193,6 +225,7 @@ def run_simulate(args: object) -> int:
     local_agent = LocalPolicyAgent()
     brain = _make_brain(args)
     book = _load_book(args, brain if args.llm else None, sim)
+    _load_stone(args, brain if args.llm else None, sim)
     if args.llm and brain is not None:
         sim.set_diarist(brain)
     max_turns = args.days * 50
@@ -205,6 +238,7 @@ def run_simulate(args: object) -> int:
         sim.result_reason = "Stopped by max turn guard."
     motto = _final_motto(sim, brain if args.llm else None)
     entry = _record_life(book, sim, args.seed, motto, brain if args.llm else None)
+    _persist_stone(args, brain if args.llm else None, sim)
     print_result(sim, motto=motto, brain=brain if args.llm else None,
                  book=book, book_entry=entry)
     print(f"Turns: {turns}")

@@ -186,10 +186,13 @@ class PixelApp:
         # regardless. Inert when the cassette has no parallel budget.
         self.deliberate_mode = bool(getattr(args, "deliberate", False))
         self.paused = False
-        self.overlay: str | None = None  # diary | help | craft | heaven | eat
+        self.overlay: str | None = None  # diary | help | craft | heaven | eat | carve
         self.diary_scroll = 0
         self.craft_sel = 0
         self.heaven_text = ""
+        # 刻む: the text being composed for the 句 carved into the stone (its own
+        # overlay, mirroring the 作戦/heaven input box: IME + CTRL+V + Enter送る).
+        self.carve_text = ""
         self._text_input_on = False
         # 承認制 (approval mode): when the day rolls over we auto-pause at the
         # boundary and show a pit-wall strip until the watcher resumes. This is
@@ -251,6 +254,11 @@ class PixelApp:
         self._book_written = False
         self._book_entry: dict | None = None
         self._inject_book()
+
+        # 石碑の記憶: load the stone (independent of --book) and let the past
+        # hermits' carvings teach on day 1. Written once at run end.
+        self._stone_written = False
+        self._load_stone_into_sim()
 
     # -- window / scale / layout --------------------------------------------
     def _initial_window(self) -> tuple[int, int]:
@@ -571,6 +579,37 @@ class PixelApp:
         self.book.set_canon(articles, self.book.canon_revision + 1)
         self._book_written = True
 
+    # -- 石碑の記憶 (the carved stone, 刻む persistence) ----------------------
+    # INDEPENDENT of --book: the stone always remembers. Same cassette+island
+    # keying; the most-recent 3 same-seed verses teach the next hermit.
+    def _stone_path(self):
+        from spl.agent.bouken import stone_path_for
+
+        return stone_path_for(self._book_cassette_name())
+
+    def _load_stone_into_sim(self) -> None:
+        """Hand the最新3句 of this seed to the sim BEFORE play, so a hermit reads
+        what past hermits chose to carve here."""
+        from spl.agent.bouken import load_stone
+
+        seed = int(getattr(self.args, "seed", 0) or 0)
+        entries = load_stone(self._stone_path())
+        same = [e["text"] for e in entries if int(e.get("seed", 0)) == seed]
+        self.sim.set_stone_carvings(same[-3:])
+
+    def _maybe_write_stone(self) -> None:
+        """Append this hermit's voluntary carvings (with days) to the stone once
+        at run end. Guarded by _stone_written; [もう一度] resets it via
+        _rebuild_sim so each life's carvings accumulate."""
+        if self._stone_written or not self.sim.done:
+            return
+        from spl.agent.bouken import append_carvings
+
+        life = self.book.lives if self.book is not None else 0
+        append_carvings(self._stone_path(), int(getattr(self.args, "seed", 0) or 0),
+                        list(getattr(self.sim, "carvings_made", []) or []), life=life)
+        self._stone_written = True
+
     def _brain_status(self) -> str:
         """思考予算 tier+TPS line for the HUD, read from the brain safely."""
         if not self.llm_enabled or self.brain is None:
@@ -688,6 +727,10 @@ class PixelApp:
         self._book_written = False
         self._book_entry = None
         self._inject_book()
+        # 石碑の記憶: reload the stone so this fresh life inherits the carvings the
+        # previous life just left, and reset the write guard.
+        self._stone_written = False
+        self._load_stone_into_sim()
         # reset the camera to the whole-island diorama for the fresh run
         self.cam_scale = self.fit_scale_val
         self.follow = False
@@ -832,7 +875,7 @@ class PixelApp:
         if crop:
             return f"{name} — {crop}"
         # 古い石碑: the stone's tile names the monument over the bare ground.
-        if tile == self._monument_pos():
+        if tile == self.sim.world.monument_pos:
             stele = f.jp("古い石碑", "Old Stone Monument")
             return f"{name} — {stele}" if tile != self.sim.hero.pos else stele
         if tile == self.sim.hero.pos:
@@ -873,6 +916,13 @@ class PixelApp:
         if verb == "move_to":
             self.walk_target = Position(int(item.args["x"]), int(item.args["y"]))
             self._last_walk_t = self.anim_t
+            self.popup = None
+            return
+        # 刻む: opening the carve box rather than dispatching — the 句 is composed
+        # in a text overlay (IME/paste), then 送る issues the carve action.
+        if verb == "carve_open":
+            self.overlay = "carve"
+            self.carve_text = ""
             self.popup = None
             return
         self.sim.step(GameAction.safe(verb, **item.args), confuse_on_invalid=False)
@@ -968,6 +1018,16 @@ class PixelApp:
                     self.sim.set_strategy(directive)
                     self.overlay = None
                     return
+            return
+        if self.overlay == "carve":
+            send = self._hits.get("carve_send")
+            if send is not None and send.collidepoint(wx, wy):
+                self._send_carve()
+                return
+            cancel = self._hits.get("carve_cancel")
+            if cancel is not None and cancel.collidepoint(wx, wy):
+                self.overlay = None
+                return
             return
         if self.overlay in {"diary", "help"}:
             self.overlay = None
@@ -1133,6 +1193,38 @@ class PixelApp:
         text = text.replace("\r", "").split("\n", 1)[0]
         self.heaven_text = (self.heaven_text + text)[:60]
 
+    def _paste_into_carve(self) -> None:
+        """CTRL+V into the 刻む box. Mirrors _paste_into_heaven (pygame has no
+        IME, so Japanese is composed elsewhere and pasted), capped at 60 chars."""
+        text = ""
+        pg = self.pg
+        try:
+            if hasattr(pg, "scrap") and getattr(pg.scrap, "get_init", lambda: False)():
+                raw = pg.scrap.get(pg.SCRAP_TEXT)
+                if raw:
+                    text = raw.decode("utf-8", "ignore") if isinstance(raw, bytes) else str(raw)
+        except Exception:  # noqa: BLE001
+            text = ""
+        if not text:
+            try:
+                text = pg.scrap.get_text() or ""
+            except Exception:  # noqa: BLE001
+                text = ""
+        if not text:
+            return
+        text = text.replace("\r", "").split("\n", 1)[0]
+        self.carve_text = (self.carve_text + text)[:60]
+
+    def _send_carve(self) -> None:
+        """送る: dispatch the carve action with the composed 句, then close the
+        box. A blank box (the hermit declined) just closes — carving is
+        voluntary, so 送る on nothing is not an error."""
+        text = self.carve_text.strip()
+        self.overlay = None
+        if not text:
+            return
+        self.sim.step(GameAction.safe("carve", text=text), confuse_on_invalid=False)
+
     # -- events --------------------------------------------------------------
     def _handle_key(self, key) -> None:
         pg = self.pg
@@ -1155,6 +1247,22 @@ class PixelApp:
                 self.heaven_text = self.heaven_text[:-1]
             elif key == pg.K_v and (mods & pg.KMOD_CTRL):
                 self._paste_into_heaven()
+            else:
+                pass  # printable text arrives via TEXTINPUT (IME-composed too)
+            return
+
+        # 刻む: the carve box reuses the heaven box's keys (Enter送る / Esc取消 /
+        # Backspace / CTRL+V paste). Enter dispatches the carve action.
+        if self.overlay == "carve":
+            mods = pg.key.get_mods()
+            if key == pg.K_RETURN:
+                self._send_carve()
+            elif key == pg.K_ESCAPE:
+                self.overlay = None
+            elif key == pg.K_BACKSPACE:
+                self.carve_text = self.carve_text[:-1]
+            elif key == pg.K_v and (mods & pg.KMOD_CTRL):
+                self._paste_into_carve()
             else:
                 pass  # printable text arrives via TEXTINPUT (IME-composed too)
             return
@@ -1420,7 +1528,7 @@ class PixelApp:
             surf.blit(spr, (cx - spr.get_width() // 2, cy - spr.get_height() + s2))
 
         # 古い石碑: the settlers' stone, on its fixed tile near home.
-        if pos == self._monument_pos():
+        if pos == self.sim.world.monument_pos:
             spr = self.factory.stele()
             surf.blit(spr, (cx - spr.get_width() // 2, cy - spr.get_height() + s2))
 
@@ -1438,24 +1546,6 @@ class PixelApp:
         if self.sim.hero.pos == pos:
             spr = self.factory.hero(frame)
             surf.blit(spr, (cx - spr.get_width() // 2, cy - spr.get_height() + s2))
-
-    def _monument_pos(self) -> Position:
-        """A deterministic walkable tile near home for the 古い石碑 (the stone
-        stands forever in one place). Scans a fixed ring of offsets around the
-        home tile and takes the first in-bounds tile that is not water, home or
-        workshop — so the stele never lands on the sea or on a building."""
-        world = self.sim.world
-        home = world.start_pos
-        # fixed offset ring, preference order (NW corner first); deterministic.
-        for dx, dy in ((-1, -1), (-1, 0), (0, -1), (-1, 1), (1, -1),
-                       (-2, 0), (0, -2), (-2, -1), (-1, -2), (1, 1)):
-            pos = Position(home.x + dx, home.y + dy)
-            if not world.in_bounds(pos):
-                continue
-            if world.tile_at(pos) in {"water", "home", "workshop"}:
-                continue
-            return pos
-        return Position(home.x - 1, home.y)
 
     def _merchant_pos(self) -> Position:
         """A deterministic tile next to the hero to stand the merchant on."""
@@ -1707,6 +1797,8 @@ class PixelApp:
             # ぼうけんのしょ: once the motto (and its lessons) has resolved, record
             # this life exactly once.
             self._maybe_write_book()
+            # 石碑の記憶: persist this hermit's voluntary carvings exactly once.
+            self._maybe_write_stone()
             hover = self._result_hover()
             self._hits["result"] = self.overlays.draw_result(
                 window, self.sim, lay, hover,
@@ -1741,6 +1833,13 @@ class PixelApp:
             self._hits["heaven_send"] = hits.get("send")
             self._hits["heaven_clear"] = hits.get("clear")
             self._hits["heaven_suggestions"] = hits.get("suggestions", [])
+        elif self.overlay == "carve":
+            hits = self.overlays.draw_carve(
+                window, self.carve_text, lay, self.sim.stone_carvings,
+                self.mouse_win,
+            )
+            self._hits["carve_send"] = hits.get("send")
+            self._hits["carve_cancel"] = hits.get("cancel")
         elif self.popup is not None:
             self._draw_popup(window)
 
@@ -1801,7 +1900,7 @@ class PixelApp:
             return
         if self.manual and self.walk_target is not None and self.overlay is None:
             self._walk_step(now)
-        if self.overlay in {"craft", "diary", "help", "heaven", "eat"}:
+        if self.overlay in {"craft", "diary", "help", "heaven", "eat", "carve"}:
             return
         # 承認制: hold at the day boundary until the watcher taps [次の日へ].
         if self.approval_pause:
@@ -1834,6 +1933,8 @@ class PixelApp:
                 elif event.type == getattr(pg, "TEXTINPUT", -1):
                     if self.overlay == "heaven" and event.text:
                         self.heaven_text = (self.heaven_text + event.text)[:60]
+                    elif self.overlay == "carve" and event.text:
+                        self.carve_text = (self.carve_text + event.text)[:60]
                 elif event.type == pg.MOUSEMOTION:
                     self._handle_motion(*event.pos)
                 elif event.type == pg.MOUSEBUTTONDOWN:
@@ -1850,7 +1951,7 @@ class PixelApp:
                 elif event.type == pg.MOUSEBUTTONUP:
                     if event.button in (2, 3):
                         self._end_pan()
-            want_ti = self.overlay == "heaven"
+            want_ti = self.overlay in {"heaven", "carve"}
             if want_ti != self._text_input_on:
                 try:  # enables the OS IME (Japanese composition) over the input box
                     (pg.key.start_text_input if want_ti else pg.key.stop_text_input)()

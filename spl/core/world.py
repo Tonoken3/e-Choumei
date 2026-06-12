@@ -113,6 +113,27 @@ class World:
     def start_pos(self) -> Position:
         return Position(self.width // 2, self.height // 2)
 
+    @property
+    def monument_pos(self) -> Position:
+        """The fixed tile of the 古い石碑 (the stone stands forever in one place).
+
+        Deterministic and rng-free: scans a fixed ring of offsets around the home
+        tile and takes the first in-bounds tile that is not water, home or
+        workshop — so the stele never lands on the sea or on a building. Derived
+        purely from ``start_pos`` + the tile scan, so it consumes no rng draws and
+        never perturbs world generation (the pixel UI's old ``_monument_pos``
+        used exactly this logic; it now lives here as the single source of truth)."""
+        home = self.start_pos
+        for dx, dy in ((-1, -1), (-1, 0), (0, -1), (-1, 1), (1, -1),
+                       (-2, 0), (0, -2), (-2, -1), (-1, -2), (1, 1)):
+            pos = Position(home.x + dx, home.y + dy)
+            if not self.in_bounds(pos):
+                continue
+            if self.tile_at(pos) in {"water", "home", "workshop"}:
+                continue
+            return pos
+        return Position(home.x - 1, home.y)
+
     def in_bounds(self, pos: Position) -> bool:
         return 0 <= pos.x < self.width and 0 <= pos.y < self.height
 

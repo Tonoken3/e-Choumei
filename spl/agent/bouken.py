@@ -41,6 +41,67 @@ def book_path_for(cassette_name: str) -> Path:
     return book_dir() / f"bouken_{slugify(cassette_name)}.json"
 
 
+# ===========================================================================
+# 石碑の記憶 (the stone's memory) — the 刻む persistence layer.
+#
+# Unlike the 冒険の書 (which records every life's lessons automatically), the
+# stone holds only the 句 a hermit CHOSE to carve. It persists per cassette+island
+# and is INDEPENDENT of --book: the stone always remembers. Same stdlib-JSON,
+# atomic-write discipline as the book.
+# ===========================================================================
+def stone_path_for(cassette_name: str) -> Path:
+    """The ``sekihi_<slug>.json`` path for a cassette (the carved stone)."""
+    return book_dir() / f"sekihi_{slugify(cassette_name)}.json"
+
+
+def load_stone(path: str | Path) -> list[dict]:
+    """Load the stone's carvings: a list of entries
+    {seed, day, life, text}. A missing/corrupt file is an empty stone."""
+    path = Path(path)
+    try:
+        raw = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return []
+    rows = raw.get("carvings") if isinstance(raw, dict) else raw
+    out: list[dict] = []
+    if isinstance(rows, list):
+        for row in rows:
+            if isinstance(row, dict) and str(row.get("text", "")).strip():
+                out.append(
+                    {
+                        "seed": int(row.get("seed") or 0),
+                        "day": int(row.get("day") or 0),
+                        "life": int(row.get("life") or 0),
+                        "text": str(row.get("text", "")).strip(),
+                    }
+                )
+    return out
+
+
+def append_carvings(path: str | Path, seed: int, day_texts: list[tuple[int, str]],
+                    life: int = 0) -> list[dict]:
+    """Append this life's carvings (each a (day, text) pair) to the stone and
+    persist atomically (tmp + os.replace). Blank texts are dropped. An empty (or
+    all-blank) ``day_texts`` is a true no-op — no file is written. Returns the
+    full carving list after the append."""
+    path = Path(path)
+    entries = load_stone(path)
+    added = False
+    for day, text in day_texts or []:
+        text = str(text).strip()
+        if not text:
+            continue
+        entries.append({"seed": int(seed), "day": int(day), "life": int(life), "text": text})
+        added = True
+    if added:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        payload = json.dumps({"carvings": entries}, ensure_ascii=False, indent=2)
+        tmp = path.with_name(path.name + ".tmp")
+        tmp.write_text(payload, encoding="utf-8")
+        os.replace(tmp, path)
+    return entries
+
+
 class BoukenNoSho:
     """A loaded adventure book. ``entries`` are dicts of
     {life, seed, days, score, ending, lessons:[str], motto}.

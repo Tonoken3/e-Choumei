@@ -94,6 +94,19 @@ class Simulation:
         # this BEFORE play starts (see cli.py / pixel app); empty means the stone
         # has only its agronomy face. The graves teach when the book is on.
         self.monument_epitaphs: list[str] = []
+        # 刻む:句 the PREVIOUS hermits voluntarily cut into the FRONT of the stone
+        # (per cassette+island). Unlike the epitaphs (auto-carved mottos) and the
+        # agronomy face, these are a hermit's own free choice — voluntary
+        # trans-generational communication. The UI layer (cli.py / pixel app)
+        # loads the stone before play and calls set_stone_carvings(); empty means
+        # no past hermit has carved here yet.
+        self.stone_carvings: list[str] = []
+        # 句 carved THIS life, with the day each was cut. Persisted at run end so
+        # the next hermit on this island inherits them; also shown on the result
+        # screen. Entries are (day:int, text:str).
+        self.carvings_made: list[tuple[int, str]] = []
+        # At most ONE carve per day; reset every morning in end_day().
+        self.carved_today: bool = False
         self.log(f"Day {self.world.day} begins: {SEASON_NAMES[self.world.season]}, {WEATHER_NAMES[self.world.weather]}.")
         self._log_monument()
         self._start_day_events()
@@ -186,6 +199,7 @@ class Simulation:
         self.world.day += 1
         self.world.weather = self.world.next_weather(self.rng, self.world.weather)
         self.day_log = []
+        self.carved_today = False
         self.hero.ap_left = self.ap_per_day
         self.hero.adjust("stamina", 48 if self.hero.has("house_upgrade") else 42)
         if self.hero.has("well"):
@@ -243,8 +257,28 @@ class Simulation:
     def _log_monument(self) -> None:
         """Carve the settlers' agronomy onto the day-1 log (古い石碑). One line,
         built from REAL crop data so it can never drift from the world's rules.
-        Lands in full_log; the day-1 recent window shows it to the brain."""
+        Lands in full_log; the day-1 recent window shows it to the brain.
+
+        刻む: when a previous hermit voluntarily cut a verse into this stone, each
+        such line is logged too — 先人の手で句が刻まれている. Normally empty on
+        day 1 (the UI sets stone_carvings AFTER construction, so set_stone_carvings
+        does the logging); this branch covers any caller that sets them first."""
         self.log(monument_inscription(self.crop_book))
+        for verse in self.stone_carvings:
+            self.log(f"石碑には先人の手で句が刻まれている: 『{verse}』")
+
+    def set_stone_carvings(self, carvings: list[str]) -> None:
+        """刻む: the句 PAST hermits voluntarily cut into the front of the stone
+        (most-recent last). Called by the UI layer BEFORE play — independent of
+        --book, since the stone always remembers. Logs each verse once so it
+        lands in the day-1 'recent' window the brain reads, and makes the
+        observer's monument value carry a compact 先人の句 suffix. Blank entries
+        are dropped; a no-op when nothing is set. Mirrors set_monument_epitaphs,
+        but these are the hermit's own free carvings, not auto-carved mottos."""
+        cleaned = [str(c).strip() for c in (carvings or []) if str(c).strip()]
+        self.stone_carvings = cleaned
+        for verse in cleaned:
+            self.log(f"石碑には先人の手で句が刻まれている: 『{verse}』")
 
     def set_monument_epitaphs(self, epitaphs: list[str]) -> None:
         """Carve up to 2 past-life mottos onto the BACK of the stone and ring

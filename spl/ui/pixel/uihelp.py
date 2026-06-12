@@ -117,6 +117,10 @@ def manhattan(a: Position, b: Position) -> int:
     return abs(a.x - b.x) + abs(a.y - b.y)
 
 
+def chebyshev(a: Position, b: Position) -> int:
+    return max(abs(a.x - b.x), abs(a.y - b.y))
+
+
 # --- Menu / action descriptors ----------------------------------------------
 @dataclass
 class MenuItem:
@@ -258,6 +262,14 @@ def build_tile_menu(fonts, sim, pos: Position) -> list[MenuItem]:
         items.append(MenuItem(fonts.jp("休む", "Rest"), "rest", cost=2))
         items.append(MenuItem(fonts.jp("日記を書く", "Write diary"), "write_diary", cost=1))
         items.append(MenuItem(fonts.jp("寝る（1日を終える）", "Sleep (end day)"), "sleep", cost=0))
+
+    # 刻む: the old stone monument. When this tile is the stone AND the hero is
+    # within Chebyshev 1 of it (the engine's carve rule), offer to cut a verse.
+    # The special "carve_open" verb opens the text overlay rather than dispatching
+    # directly. Whether to carve, and what, is the hermit's own free choice.
+    if pos == world.monument_pos and chebyshev(pos, hero.pos) <= 1:
+        items.append(MenuItem(fonts.jp("句を刻む", "Carve a verse"),
+                              "carve_open", cost=1))
 
     return items
 

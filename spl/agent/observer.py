@@ -81,10 +81,24 @@ class ObservationBuilder:
             # 古い石碑: the settlers' agronomy as permanent background knowledge —
             # always present (the stone stands forever), placed AFTER inventory
             # and alerts so it reads as lore, not an alarm. ~120 chars, built
-            # from the real crop data via the sim's loaded crop_book.
-            "monument": monument_agronomy_line(sim.crop_book),
+            # from the real crop data via the sim's loaded crop_book. 刻む: when a
+            # previous hermit voluntarily cut verses into the stone, a compact
+            # 先人の句 suffix is appended so the brain reads them as lore too.
+            "monument": self._monument_text(sim),
         })
         return obs
+
+    def _monument_text(self, sim: object) -> str:
+        """The stone's permanent monument line: the settlers' agronomy, plus a
+        compact 先人の句 suffix carrying any verses a PAST hermit voluntarily
+        carved here (most recent last). The agronomy never drifts; the carvings
+        are voluntary trans-generational messages."""
+        base = monument_agronomy_line(sim.crop_book)
+        carvings = [str(c).strip() for c in getattr(sim, "stone_carvings", []) if str(c).strip()]
+        if carvings:
+            suffix = "／".join(f"『{c}』" for c in carvings)
+            base = f"{base} 先人の句: {suffix}"
+        return base
 
     def digest(self, sim: object) -> str:
         obs = self.build(sim)

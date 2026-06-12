@@ -27,6 +27,7 @@ ACTION_WORDS = {
     "trade_decline",
     "rest",
     "write_diary",
+    "carve",
 }
 
 
@@ -443,6 +444,28 @@ class ActionEngine:
         sim.memory.add_note(sim.world.day, line)
         sim.hero.adjust("sanity", 5)
         return ActionResult(True, "Wrote in the diary.", consumed_ap=1)
+
+    def _do_carve(self, sim: object, request: GameAction) -> ActionResult:
+        """刻む: voluntarily cut a short verse into the old stone monument. The
+        carving outlives the hermit (persisted per cassette+island by the UI
+        layer), so a hermit born later on this island will read it. Deterministic
+        (no rng). Requires standing on or beside the stone; one carve per day."""
+        world = sim.world
+        hero = sim.hero
+        stone = world.monument_pos
+        if max(abs(hero.pos.x - stone.x), abs(hero.pos.y - stone.y)) > 1:
+            return ActionResult(False, "The stone is not here. (石碑のそばでなければ刻めない)")
+        text = str(request.args.get("text") or "").strip()
+        if not (1 <= len(text) <= 60):
+            return ActionResult(False, "A carving must be 1..60 characters. (一句は1〜60字)")
+        if getattr(sim, "carved_today", False):
+            return ActionResult(False, "The chisel needs rest until tomorrow.")
+        spent = self._spend(sim, 1, 4, outdoor=False)
+        if spent:
+            return spent
+        sim.carved_today = True
+        sim.carvings_made.append((world.day, text))
+        return ActionResult(True, f"Carved into the stone: 「{text}」", consumed_ap=1)
 
     def _do_sleep(self, sim: object, request: GameAction) -> ActionResult:
         return ActionResult(True, "The hero sleeps.", end_day=True)

@@ -717,6 +717,74 @@ class Overlays:
         surf.blit(foot, (x, rect.bottom - foot.get_height() - lay.px(6)))
         return {"send": send, "clear": clear, "suggestions": sug_hits}
 
+    def draw_carve(self, surf, text: str, lay: Layout,
+                   stone_carvings: list[str] | None = None,
+                   mouse: tuple[int, int] | None = None):
+        """The 刻む (carve) editor — a small text-input overlay mirroring the
+        作戦/heaven box. Shows the 句 already on the stone (先人の句, wrapped), a
+        single-line input box for THIS hermit's verse (≤60 chars), and
+        [送る]/[やめる] buttons. Returns {"send": rect, "cancel": rect} in window
+        coords. Enter sends, Esc cancels, CTRL+V pastes (the app handles keys)."""
+        pg = self.pg
+        f = self.f
+        stone_carvings = stone_carvings or []
+        mx, my = mouse if mouse else (-1, -1)
+
+        def _hot(r) -> bool:
+            return r.collidepoint(mx, my)
+
+        rect = self._panel(surf, f.jp("石に句を刻む", "Carve a verse into the stone"), lay)
+        x = rect.x + lay.px(10)
+        y = rect.y + f.big.get_height() + lay.px(10)
+
+        # the 句 already on the stone (先人の句), or 「まだ何も刻まれていない」.
+        head = _render(f.body, f.jp("石に刻まれた先人の句:", "Already on the stone:"), pal.UI_TEXT_DIM)
+        surf.blit(head, (x, y))
+        y += head.get_height() + lay.px(3)
+        if stone_carvings:
+            for verse in stone_carvings:
+                for ln in _wrap(f"『{verse}』", 40, 2):
+                    surf.blit(_render(f.body, ln, pal.UI_GOLD), (x + lay.px(6), y))
+                    y += f.body.get_height() + lay.px(2)
+        else:
+            surf.blit(_render(f.body, f.jp("（まだ何も刻まれていない）", "(nothing carved yet)"),
+                              pal.UI_TEXT_DIM), (x + lay.px(6), y))
+            y += f.body.get_height() + lay.px(2)
+        y += lay.px(8)
+
+        # instruction + text box
+        surf.blit(
+            _render(f.body,
+                    f.jp("刻む句を入力（≤60字, Enter か [送る]、CTRL+Vで貼り付け）",
+                         "Type your verse (≤60 chars; Enter or [Carve]; CTRL+V to paste)"),
+                    pal.UI_TEXT_DIM),
+            (x, y),
+        )
+        y += f.body.get_height() + lay.px(6)
+        box_h = f.body.get_height() + lay.px(8)
+        box = pg.Rect(x, y, rect.width - lay.px(20), box_h)
+        pg.draw.rect(surf, pal.UI_PANEL_LIGHT, box)
+        pg.draw.rect(surf, pal.UI_BORDER, box, max(1, lay.px(2)))
+        surf.blit(_render(f.body, text + "_", pal.UI_TEXT), (box.x + lay.px(4), box.y + lay.px(3)))
+
+        # [送る] / [やめる] buttons
+        btn_h = f.body.get_height() + lay.px(10)
+        rad = lay.px(3)
+        send = pg.Rect(x, box.bottom + lay.px(8), lay.px(96), btn_h)
+        cancel = pg.Rect(send.right + lay.px(10), send.y, lay.px(110), btn_h)
+        for b, label in ((send, f.jp("送る", "Carve")), (cancel, f.jp("やめる", "Cancel"))):
+            hot = _hot(b)
+            pg.draw.rect(surf, pal.UI_PANEL_LIGHT if hot else pal.UI_PANEL, b, border_radius=rad)
+            pg.draw.rect(surf, pal.UI_GOLD if hot else pal.UI_BORDER, b, max(1, lay.px(2)), border_radius=rad)
+            slab = _render(f.body, label, pal.UI_TEXT)
+            surf.blit(slab, (b.centerx - slab.get_width() // 2, b.centery - slab.get_height() // 2))
+
+        foot = _render(f.label, f.jp("Esc で閉じる（刻むかどうかは仙人の自由・1日に一句まで）",
+                                     "Esc to close (carving is the hermit's choice; one per day)"),
+                       pal.UI_TEXT_DIM)
+        surf.blit(foot, (x, rect.bottom - foot.get_height() - lay.px(6)))
+        return {"send": send, "cancel": cancel}
+
     def draw_pitwall(self, surf, sim, lay: Layout, mouse: tuple[int, int] | None = None):
         """承認制 pit-wall: a compact bottom-third strip shown at a day boundary.
         Shows last night's diary, the current stats line, the standing 作戦, and
@@ -869,6 +937,18 @@ class Overlays:
             for wln in _wrap(f'"{line}"', 60, 2):
                 surf.blit(_render(f.label, wln, pal.UI_GOLD), (x + lay.px(6), y))
                 y += qlh
+
+        # 刻む: the 句 this hermit voluntarily cut into the stone this life — the
+        # legacy left for the hermits born after, by the hermit's own choice.
+        carvings = [t for (_d, t) in getattr(sim, "carvings_made", []) if str(t).strip()]
+        if carvings:
+            y += lay.px(8)
+            surf.blit(_render(f.body, f.jp("石に刻んだ句:", "Carved into the stone:"), pal.UI_TEXT), (x, y))
+            y += f.body.get_height() + lay.px(3)
+            for verse in carvings:
+                for wln in _wrap(f"『{verse}』", 60, 2):
+                    surf.blit(_render(f.label, wln, pal.UI_GOLD), (x + lay.px(6), y))
+                    y += qlh
 
         highlights = (motto or {}).get("highlights") or []
         if highlights:
