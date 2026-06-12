@@ -139,6 +139,7 @@ model = "stepfun-ai/step-3.7-flash"
 api_key = "lm-studio"
 temperature = 0.7
 max_tokens = 1792   # 長考型(隠れ推論〜1000tok)の呼吸空間。代償は実時間で払う
+reasoning = true    # 推論ノーカウント: 思考部は予算外(天井4096)、時間で払う
 json_mode = true
 tps = 0.0
 persona = "あなたは方丈記を記した鴨長明のごとき隠者仙人。200Bの深い思索を持つが、行動は簡潔に。sayと日記は必ず日本語、純文学調で。"

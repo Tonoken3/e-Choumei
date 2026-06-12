@@ -2151,6 +2151,30 @@ class KizamuPixelTests(unittest.TestCase):
         self.assertEqual(app.sim.carvings_made, [])
 
 
+class ReasoningNoCountTests(unittest.TestCase):
+    """推論ノーカウント: thought is taxed in wall-clock, not tokens."""
+
+    def _brain(self, **kw):
+        from spl.agent.llm_client import Cassette, OpenAICompatibleBrain
+
+        cas = Cassette(name="x", base_url="http://127.0.0.1:9", max_tokens=384, **kw)
+        return OpenAICompatibleBrain(cas)
+
+    def test_reasoning_model_gets_safety_ceiling(self) -> None:
+        from spl.agent.llm_client import tier_for_tps
+
+        brain = self._brain(reasoning=True)
+        self.assertEqual(brain._completion_cap(tier_for_tps(50)), 4096)
+
+    def test_plain_model_keeps_breathing_space_rule(self) -> None:
+        from spl.agent.llm_client import tier_for_tps
+
+        brain = self._brain(reasoning=False)
+        self.assertEqual(brain._completion_cap(tier_for_tps(50)), 384)
+        brain2 = self._brain(reasoning=False, max_tokens=1792)
+        self.assertEqual(brain2._completion_cap(tier_for_tps(50)), 1792)
+
+
 if __name__ == "__main__":
     unittest.main()
 

@@ -47,6 +47,11 @@ class Cassette:
     # each completion; >0 = force a constant TPS (measurement ignored), so a slow
     # or fast rig can be simulated without changing the hardware.
     tps: float = 0.0
+    # Reasoning no-count (2026-06-12 ruling): hidden reasoning tokens are NOT
+    # taxed by the tier budget — the budget binds the visible answer; deep
+    # thought pays only in wall-clock time. True for models that emit
+    # reasoning_content (Step3.7 etc.); grants a 4096-token safety ceiling.
+    reasoning: bool = False
     # 八識熟考: N (0=off) concurrent inference streams over ONE observation, each a
     # themed lens (八識), aggregated into one action. A silicon mind is PARALLEL —
     # with continuous batching (vLLM) N thoughts cost ~1 thought of wall-clock.
@@ -69,6 +74,7 @@ def load_cassettes(path: Path) -> list[Cassette]:
                 json_mode=bool(row.get("json_mode", True)),
                 persona=row.get("persona", ""),
                 tps=float(row.get("tps", 0.0)),
+                reasoning=bool(row.get("reasoning", False)),
                 parallel=int(row.get("parallel", 0)),
             )
         )
@@ -618,6 +624,16 @@ class OpenAICompatibleBrain:
         action, _tokens = self._propose_timed(messages, budget, record_tps=True)
         return action
 
+    def _completion_cap(self, budget: ThinkingBudget) -> int:
+        """Tokens allowed for one completion. The tier budget binds the VISIBLE
+        answer; a declared reasoning model additionally gets a 4096 safety
+        ceiling for its hidden chain of thought — reasoning tokens are
+        no-count (the ruling: thought is taxed in wall-clock, not tokens)."""
+        cap = max(budget.max_tokens, self.cassette.max_tokens)
+        if self.cassette.reasoning:
+            cap = max(cap, 4096)
+        return cap
+
     def _propose_timed(
         self, messages: list[dict[str, str]], budget: ThinkingBudget,
         record_tps: bool = True,
@@ -626,7 +642,7 @@ class OpenAICompatibleBrain:
         ``record_tps`` switch. 八識熟考's aggregator calls this with
         ``record_tps=False`` so the per-call TPS is not double-counted against the
         single aggregate sample deliberate() records for the whole fan-out."""
-        cap = max(budget.max_tokens, self.cassette.max_tokens)
+        cap = self._completion_cap(budget)
         schema = _action_schema(budget)
         first, tokens, _elapsed = self._chat_timed(
             messages, schema=schema, max_tokens=cap, record_tps=record_tps
