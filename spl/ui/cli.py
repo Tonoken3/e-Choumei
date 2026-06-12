@@ -107,9 +107,14 @@ def _record_life(book: "BoukenNoSho | None", sim: object, seed: int,
     deterministic fallback). Returns the stored entry."""
     if book is None or not sim.done:
         return None
-    entry = book.append(build_entry(sim, seed, motto))
+    entry = book.append(build_entry(sim, seed, motto, _player_persona(brain)))
     compile_canon(book, brain)
     return entry
+
+
+def _player_persona(brain: object | None) -> str:
+    """入植者の来歴 text active on the brain (empty when none / non-LLM run)."""
+    return str(getattr(brain, "player_persona", "") or "")
 
 
 def compile_canon(book: "BoukenNoSho", brain: object | None) -> list[str]:
@@ -279,6 +284,7 @@ def _make_brain(args: object) -> object | None:
         return None
     cassette = _apply_tps_override(cassette, args)
     brain = OpenAICompatibleBrain(cassette)
+    apply_persona(brain, args)
     # 八識熟考: --deliberate forces the fan-out every turn when the cassette has a
     # parallel budget (a body scream auto-bursts regardless of this flag).
     if getattr(args, "deliberate", False) and brain.parallel > 0:
@@ -294,6 +300,23 @@ def _apply_tps_override(cassette: object, args: object) -> object:
     if tps > 0:
         return replace(cassette, tps=tps)
     return cassette
+
+
+def apply_persona(brain: object | None, args: object) -> None:
+    """入植者の来歴: graft the player-written persona onto the brain. --persona
+    appends to the cassette's own persona; --persona-replace makes the来歴 the
+    whole persona. A no-op when the brain has no persona attributes (e.g. a MAGI
+    council marker) or neither flag was given."""
+    if brain is None or not hasattr(brain, "player_persona"):
+        return
+    replace_text = getattr(args, "persona_replace", None)
+    append_text = getattr(args, "persona", None)
+    if replace_text is not None:
+        brain.player_persona = replace_text
+        brain.persona_mode = "replace"
+    elif append_text is not None:
+        brain.player_persona = append_text
+        brain.persona_mode = "append"
 
 
 def parse_manual_command(line: str) -> GameAction:
@@ -417,6 +440,12 @@ def print_result(sim: Simulation, motto: dict[str, object] | None = None,
     print(f"座右の銘: 「{motto['motto']}」")
     if motto.get("words"):
         print(f"結びの言葉: {motto['words']}")
+    # 入植者の来歴: when the watcher authored this hermit's soul, name it.
+    persona = _player_persona(brain)
+    if persona.strip():
+        shown = persona.strip()
+        shown = shown if len(shown) <= 40 else shown[:40] + "…"
+        print(f"来歴: {shown}")
     print("-" * 72)
     print(sim.result_reason or ("Still alive." if sim.hero.alive else "The hero fell."))
     print(sim.status_line())

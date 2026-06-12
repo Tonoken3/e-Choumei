@@ -864,7 +864,8 @@ class Overlays:
 
     def draw_result(self, surf, sim, lay: Layout, hover: str = "",
                     motto: dict | None = None, motto_pending: bool = False,
-                    book_lives: int = 0, book_entry: dict | None = None):
+                    book_lives: int = 0, book_entry: dict | None = None,
+                    player_persona: str = ""):
         """End-of-run panel. Returns {"again": rect, "quit": rect} in window
         coords so the app can hit-test the [もう一度] / [終了] buttons.
 
@@ -907,6 +908,15 @@ class Overlays:
                     surf.blit(slab, (x + lay.px(6), y))
                     y += f.body.get_height() + lay.px(2)
             y += lay.px(8)
+        # 入植者の来歴: when the watcher authored this soul, name it (one line).
+        # Prefer the live persona (shown even without --book); fall back to the
+        # book entry's recorded 来歴.
+        persona = str(player_persona or (book_entry or {}).get("persona", "") or "").strip()
+        if persona:
+            shown = persona if len(persona) <= 40 else persona[:40] + "…"
+            surf.blit(_render(f.body, f.jp(f"来歴: {shown}", f"Soul: {shown}"),
+                              pal.UI_TEXT_DIM), (x, y))
+            y += f.body.get_height() + lay.px(6)
         changes = getattr(sim, "strategy_changes", 0)
         info = [
             sim.result_reason or (f.jp("生存中。", "Still alive.") if hero.alive

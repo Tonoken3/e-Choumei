@@ -91,6 +91,8 @@ def run_evolve(
     cassette: object | None,
     use_llm: bool,
     book_dir_cassette: str | None = None,
+    player_persona: str | None = None,
+    persona_mode: str = "append",
 ) -> int:
     """Run ``lives`` lives, revising the 家訓 after each. Returns 0 always (the
     lineage is resilient: a dead life is logged and the next is born)."""
@@ -114,6 +116,12 @@ def run_evolve(
         elif getattr(cassette, "base_url", ""):
             brain = OpenAICompatibleBrain(cassette)
 
+    # 入植者の来歴: graft the player-written persona onto the brain (when one was
+    # given) so every life in this lineage is introduced by the watcher's text.
+    if brain is not None and player_persona is not None and hasattr(brain, "player_persona"):
+        brain.player_persona = player_persona
+        brain.persona_mode = persona_mode if persona_mode in ("append", "replace") else "append"
+
     local = LocalPolicyAgent()
     max_turns = days * 50
     days_list: list[int] = []
@@ -135,7 +143,9 @@ def run_evolve(
             _run_one_life(sim, brain, local, use_llm and brain is not None, max_turns)
 
             motto = _final_motto(sim, brain)
-            entry = book.append(build_entry(sim, seed, motto))
+            entry = book.append(build_entry(
+                sim, seed, motto, str(getattr(brain, "player_persona", "") or "")
+            ))
             articles = _compile(book, brain)
 
             d = int(entry.get("days") or 0)

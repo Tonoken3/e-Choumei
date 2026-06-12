@@ -58,6 +58,7 @@ def build_parser() -> argparse.ArgumentParser:
     pixel.add_argument("--shots", type=int, default=0, help=argparse.SUPPRESS)
     pixel.add_argument("--shots-ui", action="store_true", help=argparse.SUPPRESS)
     pixel.add_argument("--shot-dir", default="/tmp/spl_px", help=argparse.SUPPRESS)
+    _add_persona(pixel)
     pixel.set_defaults(func=run_pixel)
 
     evolve = sub.add_parser(
@@ -88,6 +89,7 @@ def build_parser() -> argparse.ArgumentParser:
         help="思考予算: force a constant tokens/sec (0=auto-measure)",
     )
     evolve.add_argument("--book-dir", default=None, help="argparse passthrough; SPL_BOOK_DIR overrides the journal dir")
+    _add_persona(evolve)
     evolve.set_defaults(func=run_evolve)
 
     arena = sub.add_parser("arena", help="compare cassettes on one seed, or one brain over many seeds")
@@ -128,6 +130,26 @@ def _add_common(parser: argparse.ArgumentParser) -> None:
         help="八識熟考: 一つの観測を八つの識で並列に読み一手に統合する"
         "（cassette の parallel>0 が必要）",
     )
+    _add_persona(parser)
+
+
+def _add_persona(parser: argparse.ArgumentParser) -> None:
+    """入植者の来歴: the PLAYER writes the hermit's self-introduction, which is
+    grafted into the system prompt. --persona appends it to the cassette's own
+    persona; --persona-replace makes it the WHOLE persona. Mutually exclusive —
+    prompt engineering becomes a benchmark axis (same model + island, different
+    player-authored souls)."""
+    group = parser.add_mutually_exclusive_group()
+    group.add_argument(
+        "--persona",
+        default=None,
+        help="入植者の来歴: この生の魂を綴る（カセットの人格に追記）",
+    )
+    group.add_argument(
+        "--persona-replace",
+        default=None,
+        help="入植者の来歴: カセットの人格を完全に置き換える来歴を綴る",
+    )
 
 
 def run_pixel(args: object) -> int:
@@ -166,6 +188,16 @@ def run_evolve(args: object) -> int:
     if use_llm is None:
         use_llm = bool(getattr(cassette, "base_url", "")) or getattr(cassette, "name", None) in ("MAGI", "MAGI-V1")
 
+    # 入植者の来歴: --persona appends, --persona-replace replaces the persona.
+    replace_text = getattr(args, "persona_replace", None)
+    append_text = getattr(args, "persona", None)
+    if replace_text is not None:
+        player_persona, persona_mode = replace_text, "replace"
+    elif append_text is not None:
+        player_persona, persona_mode = append_text, "append"
+    else:
+        player_persona, persona_mode = None, "append"
+
     return _run_evolve(
         lives=args.lives,
         seed=args.seed,
@@ -173,6 +205,8 @@ def run_evolve(args: object) -> int:
         cassette=cassette,
         use_llm=use_llm,
         book_dir_cassette=getattr(args, "cassette", None),
+        player_persona=player_persona,
+        persona_mode=persona_mode,
     )
 
 

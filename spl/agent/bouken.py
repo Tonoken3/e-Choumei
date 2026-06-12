@@ -258,9 +258,14 @@ def inject_into_observer(observer: object, book: "BoukenNoSho", seed: int) -> No
     observer.book_lives = book.lives
 
 
-def build_entry(sim: object, seed: int, motto: dict | None) -> dict:
+def build_entry(sim: object, seed: int, motto: dict | None,
+                player_persona: str = "") -> dict:
     """Compose one life's record from the ended run and its final motto dict
-    (which already carries 'lessons' from the LLM or the fallback)."""
+    (which already carries 'lessons' from the LLM or the fallback).
+
+    入植者の来歴: when the watcher wrote a persona for this life, the entry records
+    its first 120 chars so the chronicle remembers which soul lived this run (an
+    empty string when no来歴 was given)."""
     motto = motto or {}
     lessons = list(motto.get("lessons") or [])
     return {
@@ -270,6 +275,7 @@ def build_entry(sim: object, seed: int, motto: dict | None) -> dict:
         "ending": getattr(sim, "result_reason", "") or "",
         "lessons": lessons,
         "motto": str(motto.get("motto", "")).strip(),
+        "persona": (str(player_persona or "").strip())[:120],
     }
 
 

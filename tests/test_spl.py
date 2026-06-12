@@ -2509,6 +2509,166 @@ class RakuchouFeedbackTests(unittest.TestCase):
         )
 
 
+class _PersonaStubBrain:
+    """An OpenAICompatibleBrain whose ONLY network seam (_post_chat) is mocked so
+    the real _chat_timed / message assembly runs. Every call records its system
+    prompt in ``systems`` and returns a valid action or diary JSON depending on
+    the prompt — so a test can assert the player persona reached the system
+    message on both the action and the diary path. No live calls."""
+
+    @staticmethod
+    def make(persona: str = "庵の人格", tps: float = 80.0):
+        from spl.agent.llm_client import Cassette, OpenAICompatibleBrain
+
+        class _Brain(OpenAICompatibleBrain):
+            def __init__(self):
+                super().__init__(Cassette(
+                    name="persona-stub", base_url="http://stub/v1",
+                    persona=persona, tps=tps,
+                ))
+                self.systems: list[str] = []  # system prompt of every call
+
+            def _resolve_model(self):
+                return "stub-model"
+
+            def _post_chat(self, payload):
+                import json as _json
+
+                from spl.agent.prompts import DIARY_PROMPT
+
+                system = payload["messages"][0]["content"]
+                self.systems.append(system)
+                if system.startswith(DIARY_PROMPT):
+                    return _json.dumps({"diary": "今日も生きた。"}, ensure_ascii=False), 20
+                return _json.dumps(
+                    {"think": "案", "action": "rest", "args": {}, "say": "休む"},
+                    ensure_ascii=False,
+                ), 20
+
+        return _Brain()
+
+
+class NyushokushaPersonaTests(unittest.TestCase):
+    """入植者の来歴 — the player-written persona (mock transport; no live calls)."""
+
+    def _brain(self, persona="庵の人格"):
+        from spl.agent.llm_client import Cassette, OpenAICompatibleBrain
+
+        return OpenAICompatibleBrain(
+            Cassette(name="t", base_url="http://x/v1", persona=persona)
+        )
+
+    def _sim(self):
+        return Simulation(seed=42, max_days=112)
+
+    # -- effective_persona ---------------------------------------------------
+    def test_no_player_persona_returns_cassette_persona_both_modes(self) -> None:
+        b = self._brain("庵の人格")
+        self.assertEqual(b.persona_mode, "append")  # default
+        self.assertEqual(b.player_persona, "")
+        self.assertEqual(b.effective_persona(), "庵の人格")
+        b.persona_mode = "replace"
+        self.assertEqual(b.effective_persona(), "庵の人格")
+
+    def test_append_concatenates_with_bracket_header(self) -> None:
+        b = self._brain("庵の人格")
+        b.player_persona = "私は元・刀鍛冶。"
+        eff = b.effective_persona()
+        self.assertTrue(eff.startswith("庵の人格"))
+        self.assertIn("入植者の来歴", eff)
+        self.assertIn("It is who you are.", eff)
+        self.assertIn("私は元・刀鍛冶。", eff)
+
+    def test_replace_returns_player_text_only(self) -> None:
+        b = self._brain("庵の人格")
+        b.player_persona = "私は元・刀鍛冶。"
+        b.persona_mode = "replace"
+        self.assertEqual(b.effective_persona(), "私は元・刀鍛冶。")
+        self.assertNotIn("庵の人格", b.effective_persona())
+
+    def test_replace_empty_player_falls_back_to_cassette(self) -> None:
+        b = self._brain("庵の人格")
+        b.persona_mode = "replace"
+        b.player_persona = "   "  # whitespace-only is empty
+        self.assertEqual(b.effective_persona(), "庵の人格")
+
+    # -- the persona reaches the system message (action + diary paths) -------
+    def test_action_system_message_carries_player_persona(self) -> None:
+        brain = _PersonaStubBrain.make(persona="庵の人格")
+        brain.player_persona = "私は風を読む者。"
+        brain.choose(self._sim())
+        self.assertTrue(brain.systems, "no calls were made")
+        self.assertTrue(
+            all("私は風を読む者。" in s for s in brain.systems),
+            brain.systems,
+        )
+
+    def test_diary_system_message_carries_player_persona(self) -> None:
+        brain = _PersonaStubBrain.make(persona="庵の人格")
+        brain.player_persona = "私は風を読む者。"
+        out = brain.write_diary(self._sim(), season="春", weather="晴")
+        self.assertEqual(out, "今日も生きた。")
+        self.assertTrue(
+            any("私は風を読む者。" in s for s in brain.systems), brain.systems
+        )
+
+    # -- CLI flags -----------------------------------------------------------
+    def test_persona_flags_are_mutually_exclusive(self) -> None:
+        from spl.main import build_parser
+
+        parser = build_parser()
+        with self.assertRaises(SystemExit):
+            parser.parse_args(["play", "--persona", "A", "--persona-replace", "B"])
+
+    def test_cli_persona_flag_wires_onto_the_brain(self) -> None:
+        from types import SimpleNamespace
+
+        from spl.ui.cli import apply_persona
+
+        b = self._brain("庵の人格")
+        apply_persona(b, SimpleNamespace(persona="私は旅人。", persona_replace=None))
+        self.assertEqual(b.player_persona, "私は旅人。")
+        self.assertEqual(b.persona_mode, "append")
+
+    def test_cli_persona_replace_flag_wires_onto_the_brain(self) -> None:
+        from types import SimpleNamespace
+
+        from spl.ui.cli import apply_persona
+
+        b = self._brain("庵の人格")
+        apply_persona(b, SimpleNamespace(persona=None, persona_replace="私は鬼。"))
+        self.assertEqual(b.player_persona, "私は鬼。")
+        self.assertEqual(b.persona_mode, "replace")
+
+    def test_apply_persona_noop_when_neither_flag(self) -> None:
+        from types import SimpleNamespace
+
+        from spl.ui.cli import apply_persona
+
+        b = self._brain("庵の人格")
+        apply_persona(b, SimpleNamespace(persona=None, persona_replace=None))
+        self.assertEqual(b.player_persona, "")
+        self.assertEqual(b.persona_mode, "append")
+        # tolerant of a brain without the persona attributes (e.g. a MAGI marker)
+        apply_persona(object(), SimpleNamespace(persona="x", persona_replace=None))
+
+    # -- provenance: bouken entry persona (120-char cap) ---------------------
+    def test_bouken_entry_records_persona_capped_at_120(self) -> None:
+        from spl.agent.bouken import build_entry
+
+        sim = self._sim()
+        long_persona = "あ" * 200
+        entry = build_entry(sim, seed=42, motto=None, player_persona=long_persona)
+        self.assertEqual(len(entry["persona"]), 120)
+        self.assertEqual(entry["persona"], "あ" * 120)
+
+    def test_bouken_entry_persona_empty_when_none(self) -> None:
+        from spl.agent.bouken import build_entry
+
+        entry = build_entry(self._sim(), seed=42, motto=None)
+        self.assertEqual(entry["persona"], "")
+
+
 if __name__ == "__main__":
     unittest.main()
 

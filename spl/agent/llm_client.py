@@ -337,6 +337,15 @@ class OpenAICompatibleBrain:
     def __init__(self, cassette: Cassette, timeout: float = 45.0) -> None:
         self.cassette = cassette
         self.timeout = timeout
+        # 入植者の来歴: at settlement the WATCHER (not the model) may write the
+        # hermit's self-introduction, which becomes part of the system prompt —
+        # prompt engineering as a first-class game mechanic and benchmark axis
+        # (same model + island, different player-authored souls). Plain attributes,
+        # set after construction. ``append`` grafts the来歴 onto the cassette's own
+        # persona; ``replace`` makes the来歴 the WHOLE persona (cassette's is
+        # ignored unless the player left the来歴 empty).
+        self.player_persona: str = ""
+        self.persona_mode: str = "append"  # "append" | "replace"
         self.observer = ObservationBuilder()
         self._model: str | None = None
         self._schema_supported = True
@@ -365,6 +374,26 @@ class OpenAICompatibleBrain:
     def parallel(self) -> int:
         """八識熟考 fan-out width (0 = off)."""
         return max(0, int(getattr(self.cassette, "parallel", 0) or 0))
+
+    # -- 入植者の来歴 (player-written persona) -------------------------------
+    def effective_persona(self) -> str:
+        """The persona actually fed into every system prompt.
+
+        replace → the watcher's 来歴 IS the persona (falls back to the cassette's
+        own persona when the 来歴 is empty). append → the cassette's persona with
+        the 来歴 grafted on under a header that tells the model this is who it is.
+        With no 来歴 set, both modes return the cassette persona unchanged — so a
+        run with no --persona behaves exactly as before."""
+        own = self.cassette.persona or ""
+        player = (self.player_persona or "").strip()
+        if self.persona_mode == "replace":
+            return player or own
+        if player:
+            return own + (
+                "\n[入植者の来歴 — the watcher wrote this about you. "
+                "It is who you are.]\n" + player
+            )
+        return own
 
     def avg_tps(self) -> float:
         """Rolling average TPS over the last calls. Forced TPS overrides it.
@@ -429,7 +458,7 @@ class OpenAICompatibleBrain:
         self.tier_history.append(budget.name)
         obs = self.observer.build(sim)
         messages = [
-            {"role": "system", "content": SYSTEM_PROMPT + "\n" + self.cassette.persona},
+            {"role": "system", "content": SYSTEM_PROMPT + "\n" + self.effective_persona()},
             {"role": "user", "content": json.dumps(obs, ensure_ascii=False)},
         ]
         if extra:
@@ -506,7 +535,7 @@ class OpenAICompatibleBrain:
         skipped, never crashing the turn. ``max_tokens`` gives reasoning models
         breathing space before the JSON closes — paid honestly in wall-clock."""
         messages = [
-            {"role": "system", "content": lens_prompt(lens, theme) + "\n" + self.cassette.persona},
+            {"role": "system", "content": lens_prompt(lens, theme) + "\n" + self.effective_persona()},
             {"role": "user", "content": obs_json},
         ]
         cap = max(160, self.cassette.max_tokens)
@@ -572,7 +601,7 @@ class OpenAICompatibleBrain:
         # 阿頼耶識: one schema-forced action with the observation + the N counsels.
         counsel_block = "\n".join(f"【{lens}】{text}" for lens, text in counsels)
         messages = [
-            {"role": "system", "content": SYSTEM_PROMPT + "\n" + self.cassette.persona},
+            {"role": "system", "content": SYSTEM_PROMPT + "\n" + self.effective_persona()},
             {"role": "user", "content": obs_json},
             {
                 "role": "user",
@@ -634,7 +663,7 @@ class OpenAICompatibleBrain:
         before the model answers. Raises ActionParseError on unparseable output."""
         budget = budget or self.current_tier()
         messages = [
-            {"role": "system", "content": SYSTEM_PROMPT + "\n" + self.cassette.persona},
+            {"role": "system", "content": SYSTEM_PROMPT + "\n" + self.effective_persona()},
             {"role": "user", "content": json.dumps(obs, ensure_ascii=False)},
         ]
         if extra:
@@ -646,7 +675,7 @@ class OpenAICompatibleBrain:
         """One free-text (no-schema) call — the 'think' half of a relay. Returns
         the raw content (think tags and all); callers use it as plan/ruling text."""
         messages = [
-            {"role": "system", "content": system + "\n" + self.cassette.persona},
+            {"role": "system", "content": system + "\n" + self.effective_persona()},
             {"role": "user", "content": user},
         ]
         return self._chat(messages, schema=None, max_tokens=max_tokens).strip()
@@ -733,7 +762,7 @@ class OpenAICompatibleBrain:
             for p in proposals
         ]
         verify_messages = [
-            {"role": "system", "content": VERIFY_PROMPT + "\n" + self.cassette.persona},
+            {"role": "system", "content": VERIFY_PROMPT + "\n" + self.effective_persona()},
             {
                 "role": "user",
                 "content": json.dumps(
@@ -765,7 +794,7 @@ class OpenAICompatibleBrain:
             "today": day_log[-8:],
         }
         messages = [
-            {"role": "system", "content": DIARY_PROMPT + "\n" + self.cassette.persona},
+            {"role": "system", "content": DIARY_PROMPT + "\n" + self.effective_persona()},
             {"role": "user", "content": json.dumps(context, ensure_ascii=False)},
         ]
         raw = self._chat(messages, schema=_diary_schema()).strip()
@@ -801,7 +830,7 @@ class OpenAICompatibleBrain:
             "diary_tail": [entry.text for entry in sim.memory.diary[-4:]],
         }
         messages = [
-            {"role": "system", "content": MOTTO_PROMPT + "\n" + self.cassette.persona},
+            {"role": "system", "content": MOTTO_PROMPT + "\n" + self.effective_persona()},
             {"role": "user", "content": json.dumps(context, ensure_ascii=False)},
         ]
         raw = self._chat(messages, schema=_motto_schema(), max_tokens=768).strip()
@@ -839,7 +868,7 @@ class OpenAICompatibleBrain:
             "history": book.history_table(),
         }
         messages = [
-            {"role": "system", "content": COMPILE_PROMPT + "\n" + self.cassette.persona},
+            {"role": "system", "content": COMPILE_PROMPT + "\n" + self.effective_persona()},
             {"role": "user", "content": json.dumps(context, ensure_ascii=False)},
         ]
         try:

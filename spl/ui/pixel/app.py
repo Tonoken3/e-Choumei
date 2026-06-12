@@ -501,7 +501,12 @@ class PixelApp:
             from dataclasses import replace
 
             cassette = replace(cassette, tps=tps)
-        return OpenAICompatibleBrain(cassette)
+        brain = OpenAICompatibleBrain(cassette)
+        # 入植者の来歴: graft the player-written persona (--persona / --persona-replace).
+        from spl.ui.cli import apply_persona
+
+        apply_persona(brain, self.args)
+        return brain
 
     # -- 八識熟考 toggle ------------------------------------------------------
     def _can_deliberate(self) -> bool:
@@ -563,7 +568,10 @@ class PixelApp:
         from spl.agent.bouken import build_entry, fallback_compile
 
         self._book_entry = self.book.append(
-            build_entry(self.sim, getattr(self.args, "seed", 0), self._motto)
+            build_entry(
+                self.sim, getattr(self.args, "seed", 0), self._motto,
+                str(getattr(self.brain, "player_persona", "") or ""),
+            )
         )
         # 家訓の編纂: revise the fixed 5-article canon from the new history.
         # LLM compiler when a brain is available; deterministic fallback on any
@@ -1805,6 +1813,7 @@ class PixelApp:
                 motto=self._motto, motto_pending=self._motto_busy,
                 book_lives=(self.book.lives if self.book is not None else 0),
                 book_entry=self._book_entry,
+                player_persona=str(getattr(self.brain, "player_persona", "") or ""),
             )
             return
         # 承認制 pit-wall strip at the day boundary (under any open editor).
