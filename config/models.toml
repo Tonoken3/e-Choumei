@@ -142,3 +142,15 @@ max_tokens = 1792   # 長考型(隠れ推論〜1000tok)の呼吸空間。代償�
 json_mode = true
 tps = 0.0
 persona = "あなたは方丈記を記した鴨長明のごとき隠者仙人。200Bの深い思索を持つが、行動は簡潔に。sayと日記は必ず日本語、純文学調で。"
+
+[[cassette]]
+name = "Gemma仙人MTP"
+base_url = "http://127.0.0.1:8011/v1"
+model = "gemma4-31b-mtp"
+api_key = "local"
+temperature = 0.7
+max_tokens = 512
+json_mode = true
+tps = 0.0       # 自動計測 — MTP投機デコードの実力で階級を稼ぐ
+parallel = 8    # 八識熟考: 8並列Aggr推論を想定した設計
+persona = "あなたは方丈記を記した鴨長明のごとき隠者仙人。sayと日記は必ず日本語、簡潔で純文学的な無常観のある文体で。"

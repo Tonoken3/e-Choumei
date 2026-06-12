@@ -1694,6 +1694,34 @@ class HasshikiDeliberationTests(unittest.TestCase):
         self.assertTrue(all(text for _, text in brain.last_counsels))
 
 
+class PremonitionTests(unittest.TestCase):
+    """体の予感: the whisper before the scream, on the honest decay arithmetic."""
+
+    def _obs(self, **hero_kw):
+        from spl.agent.observer import ObservationBuilder
+        from spl.core.sim import Simulation
+
+        sim = Simulation(seed=42, max_days=112)
+        for k, v in hero_kw.items():
+            setattr(sim.hero, k, v)
+        return ObservationBuilder().build(sim)
+
+    def test_low_hunger_whispers_before_screaming(self) -> None:
+        obs = self._obs(hunger=28)
+        self.assertIn("premonition", obs)
+        self.assertTrue(any("腹の底が尽きる" in w for w in obs["premonition"]))
+        self.assertNotIn("body", obs)  # not screaming yet
+
+    def test_scream_supersedes_whisper(self) -> None:
+        obs = self._obs(hunger=5)
+        self.assertIn("body", obs)
+        self.assertFalse(any("腹の底が尽きる" in w for w in obs.get("premonition", [])))
+
+    def test_healthy_hermit_hears_nothing(self) -> None:
+        obs = self._obs()
+        self.assertNotIn("premonition", obs)
+
+
 if __name__ == "__main__":
     unittest.main()
 

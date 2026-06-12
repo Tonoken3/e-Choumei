@@ -17,6 +17,9 @@ How the world works (the sim enforces all of this; read "recent" to see why your
 - "body" is your own flesh speaking (interoception). It interrupts every plan
   AND even the watcher's order — a dying body obeys thirst before orders.
   Satisfy the body first, then resume the plan.
+- "premonition" is your body's forecast (体の予感): not pain yet, but arithmetic
+  — at this rate, X runs out in N days. Procurement takes TIME (fish refuse,
+  crops grow slowly); act on a premonition TODAY, not when the pain arrives.
 - strategy_from_heaven is the watcher's standing order (作戦). The watcher SEES THE TRUE WORLD STATE — your own beliefs may be wrong. The order stays in force day after day until the watcher changes it; weigh it heavily every turn.
 - bouken_no_sho holds lessons written by your PAST SELVES after dying on this island. They paid for them with their lives; weigh them like scripture.
 """

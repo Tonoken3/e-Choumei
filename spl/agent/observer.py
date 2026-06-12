@@ -30,12 +30,17 @@ class ObservationBuilder:
             current = f"Field({crop.name}:{'ready' if plot.ready else str(plot.days_left) + 'd'})"
         alerts = self._alerts(sim)
         body = self._body_screams(sim)
+        premonition = self._body_premonitions(sim)
         obs: dict[str, object] = {}
         # 体の声: the flesh interrupts everything — even the watcher's order.
         # A calm ledger line cannot compete with a long train of thought; a body
         # can. Present only when a stat turns critical.
         if body:
             obs["body"] = body
+        # 体の予感: not pain yet — arithmetic. The whisper BEFORE the scream,
+        # because procurement has lead time (誰だってわかること、を感覚器官に).
+        if premonition:
+            obs["premonition"] = premonition
         obs.update({
             # The watcher's standing order (作戦). Placed at the TOP on purpose:
             # the watcher SEES THE TRUE WORLD STATE, so this outranks the hermit's
@@ -129,6 +134,32 @@ class ObservationBuilder:
         if sim.world.season == "winter" and not hero.has("house_upgrade"):
             screams.append("寒さに体が震えて止まらぬ。火と壁が要る。家を固めよ。")
         return screams
+
+    def _body_premonitions(self, sim: object) -> list[str]:
+        """体の予感 (the body's forecast). Linear extrapolation over the world's
+        honest nightly decay floor (hunger -15/day, water -20/day): when a stat
+        is within ~2 days of zero — but not yet screaming — the body whispers
+        "at this rate...". Food has procurement lead time; the scream arrives
+        too late, the premonition arrives in time. Winter gets the same organ:
+        unwalled houses bleed every winter night, and winter keeps its schedule."""
+        hero = sim.hero
+        whispers: list[str] = []
+        if 10 < hero.hunger <= 30:
+            days = max(1, round(hero.hunger / 15))
+            whispers.append(
+                f"このままでは、あと{days}日で腹の底が尽きる。食の手当には時がかかる——今日のうちに獲り、食い、蓄えよ。"
+            )
+        if 10 < hero.water <= 40:
+            days = max(1, round(hero.water / 20))
+            whispers.append(
+                f"このままでは、あと{days}日で喉が涸れる。今日のうちに水を確保せよ。"
+            )
+        days_to_winter = 85 - sim.world.day
+        if 0 < days_to_winter <= 7 and not hero.has("house_upgrade"):
+            whispers.append(
+                f"冬まであと{days_to_winter}日。壁なき家は冬の夜ごとに体を削る。家を固め、蓄えを積むなら今だ。"
+            )
+        return whispers
 
     def _alerts(self, sim: object) -> list[str]:
         hero = sim.hero
