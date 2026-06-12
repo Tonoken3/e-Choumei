@@ -2157,7 +2157,8 @@ class ReasoningNoCountTests(unittest.TestCase):
     def _brain(self, **kw):
         from spl.agent.llm_client import Cassette, OpenAICompatibleBrain
 
-        cas = Cassette(name="x", base_url="http://127.0.0.1:9", max_tokens=384, **kw)
+        kw.setdefault("max_tokens", 384)
+        cas = Cassette(name="x", base_url="http://127.0.0.1:9", **kw)
         return OpenAICompatibleBrain(cas)
 
     def test_reasoning_model_gets_safety_ceiling(self) -> None:
